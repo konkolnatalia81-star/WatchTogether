@@ -215,7 +215,7 @@ io.on("connection", socket => {
     if (!room) return reply({ ok: false, error: "Группа не найдена. Проверь код." });
     if (room.members.has(socket.id)) return reply({ ok: true, room: publicRoom(room) });
     if (room.members.size >= ROOM_CAPACITY) {
-      return reply({ ok: false, error: `В комнате может быть не более ${ROOM_CAPACITY} участников.` });
+      return reply({ ok: false, error: `В комн��те может быть не более ${ROOM_CAPACITY} участников.` });
     }
 
     leaveRoom(socket);
