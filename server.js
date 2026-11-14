@@ -10,7 +10,7 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
   // Socket.IO uses same-origin by default; no wildcard CORS for room signaling.
-n  maxHttpBufferSize: 1e6,
+  maxHttpBufferSize: 1e6,
   pingInterval: 25000,
   pingTimeout: 20000
 });
