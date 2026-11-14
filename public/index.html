@@ -11,7 +11,9 @@
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <div class="glow glow-a"></div><div class="glow glow-b"></div>
+  <div class="glow glow-a"></div>
+  <div class="glow glow-b"></div>
+
   <header class="topbar">
     <a class="brand" href="/"><span class="brand-mark">▶</span><span>watch<span class="brand-accent">together</span></span></a>
     <div class="top-status"><span class="status-dot"></span> Смотреть вместе — проще</div>
@@ -24,11 +26,14 @@
         <h1>Смотрите вместе.<br><span>Даже на расстоянии.</span></h1>
         <p class="hero-copy">Создай комнату, пригласи друзей по коду, включи видео и общайтесь в чате или голосом.</p>
       </div>
+
       <div class="entry-card">
         <label for="nickname">Как тебя называть?</label>
         <input id="nickname" maxlength="24" placeholder="Например, Alex" autocomplete="nickname">
         <button id="createBtn" class="primary-btn"><span>＋</span> Создать комнату</button>
+
         <div class="or-line"><span></span> ИЛИ <span></span></div>
+
         <label for="roomCode">Есть код группы?</label>
         <div class="join-row">
           <input id="roomCode" maxlength="6" placeholder="ВВЕДИ КОД" autocomplete="off">
@@ -36,6 +41,7 @@
         </div>
         <p id="homeError" class="error-text"></p>
       </div>
+
       <div class="feature-row">
         <div><span class="feature-icon">▣</span><b>Общий экран</b><small>Синхронное видео</small></div>
         <div><span class="feature-icon">◉</span><b>Голосовой чат</b><small>Общайтесь вместе</small></div>
@@ -45,18 +51,42 @@
 
     <section id="roomView" class="room-view hidden">
       <div class="room-heading">
-        <div><div class="eyebrow"><span></span> КОМНАТА ПРОСМОТРА</div><h2 id="roomTitle">Комната</h2></div>
-        <div class="room-code-box"><small>КОД ПРИГЛАШЕНИЯ</small><div><strong id="roomCodeDisplay">------</strong><button id="copyCodeBtn" title="Скопировать код">▢</button></div></div>
+        <div>
+          <div class="eyebrow"><span></span> КОМНАТА ПРОСМОТРА</div>
+          <h2 id="roomTitle">Комната</h2>
+        </div>
+
+        <div class="room-code-box">
+          <small>КОД ПРИГЛАШЕНИЯ</small>
+          <div>
+            <strong id="roomCodeDisplay">------</strong>
+            <button id="copyCodeBtn" title="Скопировать код">▢</button>
+          </div>
+        </div>
+
         <button id="leaveBtn" class="leave-btn">Выйти <span>↗</span></button>
       </div>
 
       <div class="workspace">
         <div class="main-column">
           <div class="player-card">
-            <div class="player-top"><span class="live-dot"></span><span>СОВМЕСТНЫЙ ПРОСМОТР</span><span id="mediaTitle" class="media-title">Видео пока не выбрано</span></div>
-            <div id="playerStage" class="player-stage">
-              <div class="empty-player"><div class="play-orb">▶</div><h3>Что будем смотреть?</h3><p>Владелец комнаты может добавить видео с устройства или YouTube.</p></div>
+            <div class="player-top">
+              <div class="player-live"><span class="live-dot"></span><span>СОВМЕСТНЫЙ ПРОСМОТР</span></div>
+              <div class="player-actions">
+                <button id="fullscreenMicBtn" class="icon-btn" title="Микрофон в полном экране">🎙</button>
+                <button id="fullscreenBtn" class="icon-btn" title="Полный экран">⤢</button>
+              </div>
+              <span id="mediaTitle" class="media-title">Видео пока не выбрано</span>
             </div>
+
+            <div id="playerStage" class="player-stage">
+              <div class="empty-player">
+                <div class="play-orb">▶</div>
+                <h3>Что будем смотреть?</h3>
+                <p>Владелец комнаты может добавить видео с YouTube или файла.</p>
+              </div>
+            </div>
+
             <div class="player-controls">
               <button id="backBtn" class="control-btn" title="Назад на 10 секунд">↶ <small>10</small></button>
               <button id="playBtn" class="play-btn" title="Воспроизвести">▶</button>
@@ -64,47 +94,92 @@
               <span id="timeLabel" class="time-label">00:00</span>
               <input id="seekBar" class="seek-bar" type="range" min="0" max="100" value="0">
               <span id="durationLabel" class="time-label">00:00</span>
+              <button id="playerFullscreenBtn" class="control-btn small" title="Полный экран">⤢</button>
               <span id="ownerHint" class="owner-hint">Управляет владелец</span>
             </div>
           </div>
 
           <div id="ownerTools" class="owner-tools">
-            <div class="tools-heading"><div><h3>Добавить видео</h3><p>Выбери источник для всей комнаты</p></div><span class="owner-pill">♛ ВЛАДЕЛЕЦ</span></div>
-            <div class="source-tabs"><button class="source-tab active" data-tab="youtube">▶ YouTube</button><button class="source-tab" data-tab="file">▧ Файл с устройства</button></div>
-            <div id="youtubePanel" class="source-panel">
-              <div class="input-action"><input id="youtubeUrl" placeholder="Вставь ссылку на YouTube-видео"><button id="addYoutubeBtn" class="primary-btn compact">Добавить</button></div>
-              <p class="hint">Вставь ссылку на обычное YouTube-видео. Поиск по каталогу YouTube можно подключить отдельно через API-ключ.</p>
+            <div class="tools-heading">
+              <div>
+                <h3>Добавить видео</h3>
+                <p>Выбери источник для всей комнаты</p>
+              </div>
+              <span class="owner-pill">♛ ВЛАДЕЛЕЦ</span>
             </div>
+
+            <div class="source-tabs">
+              <button class="source-tab active" data-tab="youtube">▶ YouTube</button>
+              <button class="source-tab" data-tab="file">▧ Файл с устройства</button>
+            </div>
+
+            <div id="youtubePanel" class="source-panel">
+              <div class="input-action">
+                <input id="youtubeUrl" placeholder="Вставь ссылку на YouTube-видео">
+                <button id="addYoutubeBtn" class="primary-btn compact">Добавить</button>
+              </div>
+              <p class="hint">Вставь ссылку на обычное YouTube-видео. Для вертикальных роликов поддерживается корректная обработка соотношения сторон.</p>
+            </div>
+
             <div id="filePanel" class="source-panel hidden">
-              <label class="upload-drop" for="videoFile"><span>↑</span><b>Выбрать видеофайл</b><small>MP4, WebM и другие видеоформаты · до 500 МБ</small></label>
+              <label class="upload-drop" for="videoFile"><span>↑</span><b>Выбрать видеофайл</b><small>MP4, WebM, MOV и другие форматы · до 500 МБ</small></label>
               <input id="videoFile" type="file" accept="video/*" hidden>
               <p id="uploadStatus" class="hint">Файл загружается на сервер сайта и становится доступен участникам комнаты.</p>
+            </div>
+
+            <div class="library-panel">
+              <div class="library-header">
+                <h3>Мои видео</h3>
+                <button id="refreshLibraryBtn" class="ghost-btn" type="button">Обновить</button>
+              </div>
+              <div id="libraryList" class="library-list"></div>
             </div>
           </div>
         </div>
 
         <aside class="side-column">
           <div class="panel people-panel">
-            <div class="panel-heading"><h3>Участники</h3><span id="peopleCount" class="count-pill">0</span></div>
+            <div class="panel-heading">
+              <h3>Участники</h3>
+              <span id="peopleCount" class="count-pill">0</span>
+            </div>
             <div id="peopleList" class="people-list"></div>
           </div>
+
           <div class="panel voice-panel">
-            <div class="panel-heading"><h3>Голосовая связь</h3><span class="voice-status"><i></i> Комната</span></div>
+            <div class="panel-heading">
+              <h3>Голосовая связь</h3>
+              <span class="voice-status"><i></i> Комната</span>
+            </div>
             <p class="panel-subtitle">Общайтесь голосом во время просмотра.</p>
-            <div class="voice-actions"><button id="micBtn" class="mic-btn">🎙 Включить микрофон</button></div>
+            <div class="voice-actions">
+              <button id="micBtn" class="mic-btn">🎙 Включить микрофон</button>
+            </div>
             <p id="voiceStatus" class="voice-note">Микрофон выключен</p>
           </div>
+
           <div class="panel chat-panel">
-            <div class="panel-heading"><h3>Сообщения</h3><span class="chat-live"><i></i> LIVE</span></div>
-            <div id="chatMessages" class="chat-messages"><div class="chat-empty">Сообщения появятся здесь. Напиши первым!</div></div>
-            <form id="chatForm" class="chat-form"><input id="chatInput" maxlength="1000" placeholder="Написать сообщение..." autocomplete="off"><button type="submit" aria-label="Отправить">↑</button></form>
+            <div class="panel-heading">
+              <h3>Сообщения</h3>
+              <span class="chat-live"><i></i> LIVE</span>
+            </div>
+            <div id="chatMessages" class="chat-messages">
+              <div class="chat-empty">Сообщения появятся здесь. Напиши первым!</div>
+            </div>
+            <form id="chatForm" class="chat-form">
+              <input id="chatInput" maxlength="1000" placeholder="Написать сообщение..." autocomplete="off">
+              <button type="submit" aria-label="Отправить сообщение">➤</button>
+            </form>
           </div>
         </aside>
       </div>
+
       <p class="footer-note">WatchTogether · Первая версия · Не закрывай вкладку во время просмотра</p>
     </section>
   </main>
+
   <div id="toast" class="toast"></div>
+
   <script src="/socket.io/socket.io.js"></script>
   <script src="https://www.youtube.com/iframe_api"></script>
   <script src="/app.js"></script>
