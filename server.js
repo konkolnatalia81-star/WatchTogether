@@ -4,6 +4,7 @@ const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
 const multer = require("multer");
+const AWS = require("aws-sdk");
 const { Server } = require("socket.io");
 
 const app = express();
@@ -20,8 +21,16 @@ const PUBLIC_DIR = path.join(__dirname, "public");
 const MAX_UPLOAD_BYTES = 500 * 1024 * 1024;
 const ROOM_CAPACITY = 12;
 const RECONNECT_GRACE_MS = 25000;
+const STORAGE_MODE = process.env.AWS_S3_BUCKET && process.env.AWS_REGION && process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY ? "s3" : "local";
 
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
+const s3 = STORAGE_MODE === "s3" ? new AWS.S3({
+  region: process.env.AWS_REGION,
+  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  signatureVersion: "v4"
+}) : null;
 
 app.disable("x-powered-by");
 app.use(express.static(PUBLIC_DIR, { etag: true, maxAge: "1h" }));
@@ -90,7 +99,7 @@ function cleanMedia(media) {
   const url = String(media.url || "").trim();
   if (!url) return null;
   if (media.type === "youtube" && !validYoutubeUrl(url)) return null;
-  if (media.type === "file" && !/^\/uploads\/[A-Za-z0-9._-]+$/i.test(url)) return null;
+  if (media.type === "file" && !/^\/uploads\/[A-Za-z0-9._-]+$/i.test(url) && !/^https?:\/\//i.test(url)) return null;
 
   return {
     type: media.type,
@@ -127,13 +136,7 @@ function findMemberBySession(room, sessionId) {
 
 function assignSessionRoom(sessionId, roomCode, socketId, name, isOwner = false) {
   if (!sessionId) return;
-  sessionRegistry.set(sessionId, {
-    roomCode,
-    socketId,
-    name,
-    isOwner,
-    updatedAt: Date.now()
-  });
+  sessionRegistry.set(sessionId, { roomCode, socketId, name, isOwner, updatedAt: Date.now() });
 }
 
 function clearSession(sessionId) {
@@ -147,15 +150,12 @@ function isOwner(socket, room) {
 
 function transferOwnership(room) {
   if (!room || room.members.size === 0) return;
-  if (!room.members.has(room.ownerId)) {
-    room.ownerId = room.members.keys().next().value;
-  }
+  if (!room.members.has(room.ownerId)) room.ownerId = room.members.keys().next().value;
 }
 
 function removeMember(socket, room, options = {}) {
   const { force = false, explicit = false } = options;
   if (!room || !socket) return;
-
   const sessionId = socket.data?.sessionId || null;
   const member = room.members.get(socket.id) || findMemberBySession(room, sessionId);
   if (!member) return;
@@ -197,32 +197,73 @@ function leaveRoom(socket, options = {}) {
   member.offline = true;
   assignSessionRoom(socket.data?.sessionId, code, member.id, member.name, room.ownerId === member.id);
   io.to(code).emit("room:update", publicRoom(room));
-  if (member.id !== socket.id) {
-    socket.to(code).emit("chat:system", `${member.name} временно отключился(ась)`);
-  }
+  if (member.id !== socket.id) socket.to(code).emit("chat:system", `${member.name} временно отключился(ась)`);
 }
 
-app.post("/api/upload", upload.single("video"), (req, res) => {
-  if (!req.file) return res.status(400).json({ error: "Файл не получен." });
-  const fileId = crypto.randomUUID();
-  const relativeUrl = `/uploads/${req.file.filename}`;
-  const media = {
-    id: fileId,
-    type: "file",
-    url: relativeUrl,
-    title: path.basename(req.file.originalname).slice(0, 120),
-    size: req.file.size,
-    mime: req.file.mimetype,
-    createdAt: Date.now()
+async function persistUploadedFile(file) {
+  const filename = file.filename;
+  const originalName = path.basename(file.originalname).slice(0, 120);
+
+  if (STORAGE_MODE === "s3" && s3) {
+    const key = `uploads/${filename}`;
+    const body = fs.readFileSync(file.path);
+    const publicBase = process.env.AWS_PUBLIC_BASE_URL || `https://${process.env.AWS_S3_BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com`;
+    const url = `${publicBase.replace(/\/$/, "")}/${key}`;
+    await s3.putObject({
+      Bucket: process.env.AWS_S3_BUCKET,
+      Key: key,
+      Body: body,
+      ContentType: file.mimetype || "application/octet-stream",
+      ACL: "public-read"
+    }).promise();
+    fs.unlinkSync(file.path);
+    return {
+      url,
+      name: originalName,
+      size: file.size,
+      mime: file.mimetype,
+      storage: "s3"
+    };
+  }
+
+  return {
+    url: `/uploads/${filename}`,
+    name: originalName,
+    size: file.size,
+    mime: file.mimetype,
+    storage: "local"
   };
-  mediaLibrary.set(fileId, media);
-  res.status(201).json({
-    id: fileId,
-    url: relativeUrl,
-    name: media.title,
-    size: req.file.size,
-    mime: req.file.mimetype
-  });
+}
+
+app.post("/api/upload", upload.single("video"), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "Файл не получен." });
+
+  try {
+    const media = await persistUploadedFile(req.file);
+    const fileId = crypto.randomUUID();
+    const record = {
+      id: fileId,
+      type: "file",
+      url: media.url,
+      title: media.name,
+      size: media.size,
+      mime: media.mime,
+      createdAt: Date.now(),
+      storage: media.storage
+    };
+    mediaLibrary.set(fileId, record);
+
+    res.status(201).json({
+      id: fileId,
+      url: media.url,
+      name: media.name,
+      size: media.size,
+      mime: media.mime
+    });
+  } catch (error) {
+    console.error("Upload failed:", error);
+    res.status(500).json({ error: "Не удалось сохранить видео." });
+  }
 });
 
 app.get("/api/library", (_req, res) => {
@@ -230,13 +271,18 @@ app.get("/api/library", (_req, res) => {
   res.json({ items });
 });
 
-app.delete("/api/library/:id", (req, res) => {
+app.delete("/api/library/:id", async (req, res) => {
   const existing = mediaLibrary.get(req.params.id);
   if (!existing) return res.status(404).json({ error: "Файл не найден." });
 
-  const target = path.join(UPLOAD_DIR, path.basename(existing.url));
   try {
-    if (fs.existsSync(target)) fs.unlinkSync(target);
+    if (existing.storage === "s3" && s3 && process.env.AWS_S3_BUCKET) {
+      const key = new URL(existing.url).pathname.replace(/^\//, "");
+      await s3.deleteObject({ Bucket: process.env.AWS_S3_BUCKET, Key: key }).promise();
+    } else {
+      const target = path.join(UPLOAD_DIR, path.basename(existing.url));
+      if (fs.existsSync(target)) fs.unlinkSync(target);
+    }
   } catch (error) {
     console.warn("Library delete file failed", error.message);
   }
@@ -245,7 +291,7 @@ app.delete("/api/library/:id", (req, res) => {
   res.json({ ok: true });
 });
 
-app.get("/api/health", (_req, res) => res.json({ ok: true, service: "WatchTogether" }));
+app.get("/api/health", (_req, res) => res.json({ ok: true, service: "WatchTogether", storage: STORAGE_MODE }));
 
 app.get("/api/voice-config", (_req, res) => {
   const iceServers = [{ urls: process.env.STUN_URL || "stun:stun.l.google.com:19302" }];
@@ -458,4 +504,4 @@ app.use((err, _req, res, _next) => {
 
 server.listen(PORT, () => console.log(`WatchTogether запущен на порту ${PORT}`));
 
-module.exports = { app, server, rooms, mediaLibrary };
+module.exports = { app, server, rooms, mediaLibrary, STORAGE_MODE };
