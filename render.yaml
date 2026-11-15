@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: watchtogether
+    runtime: node
+    plan: starter
+    buildCommand: apt-get update && apt-get install -y ffmpeg && npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATA_DIR
+        value: /var/data
+    disk:
+      name: watchtogether-data
+      mountPath: /var/data
+      sizeGB: 10
