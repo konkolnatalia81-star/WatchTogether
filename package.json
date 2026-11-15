@@ -1,17 +1,19 @@
 {
   "name": "watchtogether",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "private": true,
-  "description": "WatchTogether — совместный просмотр видео, комнаты, чат и голос",
+  "description": "WatchTogether",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js",
-    "check": "node --check server.js && node --check public/app.js"
+    "dev": "node --watch server.js"
   },
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
     "express": "^4.21.2",
+    "multer": "^2.0.2",
     "socket.io": "^4.8.1"
   }
 }
