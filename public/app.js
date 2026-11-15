@@ -1,408 +1,136 @@
-const socket = io({ reconnection: true, reconnectionAttempts: Infinity });
+const socket = io({ reconnection:true, reconnectionAttempts:Infinity, reconnectionDelay:1000, reconnectionDelayMax:8000 });
 const $ = id => document.getElementById(id);
-let currentRoom = null;
-let isOwner = false;
-let mediaElement = null;
-let ytPlayer = null;
-let suppressPlayerEvents = false;
-let localStream = null;
-let iceServers = [{ urls: "stun:stun.l.google.com:19302" }];
-const peers = new Map();
-const remoteAudio = new Map();
-let syncTimeout = null;
-
-window.onYouTubeIframeAPIReady = () => {
-  if (currentRoom?.media?.type === "youtube") renderMedia(currentRoom.media, currentRoom.playback);
-};
-
-function toast(message) {
-  $("toast").textContent = message;
-  $("toast").classList.add("show");
-  clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => $("toast").classList.remove("show"), 3000);
+let currentRoom=null, isOwner=false, mediaElement=null, ytPlayer=null, suppressPlayerEvents=false, localStream=null;
+let iceServers=[{urls:"stun:stun.l.google.com:19302"}];
+const peers=new Map(), remoteAudio=new Map();
+const SESSION_KEY="wt_session_v2", ROOM_KEY="wt_room_v2", NAME_KEY="wt_name_v2";
+let sessionId=localStorage.getItem(SESSION_KEY);
+if(!sessionId){sessionId=crypto.randomUUID();localStorage.setItem(SESSION_KEY,sessionId);}
+$("nickname").value=localStorage.getItem(NAME_KEY)||"";
+window.onYouTubeIframeAPIReady=()=>{if(currentRoom?.media?.type==="youtube")renderMedia(currentRoom.media,currentRoom.playback);};
+function toast(msg){$("toast").textContent=msg;$("toast").classList.add("show");clearTimeout(toast.timer);toast.timer=setTimeout(()=>$("toast").classList.remove("show"),3000);}
+function nickname(){const n=$("nickname").value.trim()||"Гость";localStorage.setItem(NAME_KEY,n);return n;}
+function setError(v){$("homeError").textContent=v||"";}
+function showHome(){$("home").classList.remove("hidden");$("roomView").classList.add("hidden");}
+function showRoom(){$("home").classList.add("hidden");$("roomView").classList.remove("hidden");}
+function emitReply(event,data){return new Promise(resolve=>{if(!socket.connected)return resolve({ok:false,error:"Нет соединения с сервером."});socket.timeout(12000).emit(event,data,(err,result)=>resolve(err?{ok:false,error:"Сервер не ответил."}:result));});}
+function esc(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
+function setOwnerControls(){
+ $("ownerTools").classList.toggle("hidden",!isOwner);$("ownerHint").textContent=isOwner?"Ты управляешь видео":"Управляет владелец";
+ ["playBtn","backBtn","forwardBtn","seekBar"].forEach(id=>$(id).disabled=!isOwner);
+ $("playBtn").textContent=currentRoom?.playback?.playing?"Ⅱ":"▶";
 }
-function setError(message) { $("homeError").textContent = message || ""; }
-function nickname() { return $("nickname").value.trim() || "Гость"; }
-function showHome() { $("home").classList.remove("hidden"); $("roomView").classList.add("hidden"); }
-function showRoom() { $("home").classList.add("hidden"); $("roomView").classList.remove("hidden"); }
-function emitWithReply(event, data) {
-  return new Promise(resolve => {
-    if (!socket.connected) return resolve({ ok: false, error: "Нет соединения с сервером." });
-    socket.timeout(8000).emit(event, data, (error, result) => resolve(error ? { ok: false, error: "Сервер не ответил. Попробуй ещё раз." } : result));
-  });
+function enterRoom(room){
+ const changed=currentRoom?.code!==room.code;currentRoom=room;isOwner=room.ownerId===sessionId;
+ $("roomTitle").textContent=room.name;$("roomCodeDisplay").textContent=room.code;
+ localStorage.setItem(ROOM_KEY,JSON.stringify({code:room.code,sessionId}));
+ setOwnerControls();renderParticipants(room.participants||[]);
+ if(room.media)renderMedia(room.media,room.playback);else clearMedia();
+ showRoom();if(changed)$("chatMessages").innerHTML='<div class="chat-empty">Сообщения появятся здесь. Напиши первым!</div>';
 }
-function escapeText(text) {
-  return String(text).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+function renderParticipants(list){
+ $("peopleCount").textContent=list.length;
+ $("peopleList").innerHTML=list.map(p=>`<div class="person"><div class="avatar">${esc((p.name||"?").slice(0,1).toUpperCase())}</div><span class="person-name">${esc(p.name)}</span>${p.isOwner?'<span class="person-role">Владелец</span>':""}</div>`).join("");
 }
-function setOwnerControls() {
-  $("ownerTools").classList.toggle("hidden", !isOwner);
-  $("ownerHint").textContent = isOwner ? "Ты управляешь видео" : "Управляет владелец";
-  ["playBtn", "backBtn", "forwardBtn", "seekBar"].forEach(id => { $(id).disabled = !isOwner; });
+function destroyYouTube(){try{ytPlayer?.destroy?.();}catch{}ytPlayer=null;}
+function clearMedia(){
+ $("playerStage").replaceChildren();$("playerStage").dataset.mediaUrl="";
+ const empty=document.createElement("div");empty.className="empty-player";empty.innerHTML='<div class="play-orb">▶</div><h3>Что будем смотреть?</h3><p>Владелец комнаты может добавить видео с YouTube или из библиотеки.</p>';$("playerStage").append(empty);
+ $("mediaTitle").textContent="Видео пока не выбрано";$("timeLabel").textContent="00:00";$("durationLabel").textContent="00:00";$("seekBar").value=0;mediaElement=null;destroyYouTube();updatePlayButton();
 }
-function enterRoom(room) {
-  const changedRoom = currentRoom?.code !== room.code;
-  currentRoom = room;
-  isOwner = room.ownerId === socket.id;
-  $("roomTitle").textContent = room.name;
-  $("roomCodeDisplay").textContent = room.code;
-  setOwnerControls();
-  renderParticipants(room.participants || []);
-  if (room.media) renderMedia(room.media, room.playback);
-  else clearMedia();
-  showRoom();
-  if (changedRoom) $("chatMessages").innerHTML = '<div class="chat-empty">Сообщения появятся здесь. Напиши первым!</div>';
+function renderMedia(media,playback){
+ if(!media)return clearMedia();$("mediaTitle").textContent=media.title||"Видео";
+ if($("playerStage").dataset.mediaUrl===media.url&&(mediaElement||ytPlayer)){if(playback)applyPlayback(playback);return;}
+ destroyYouTube();mediaElement=null;$("playerStage").replaceChildren();$("playerStage").dataset.mediaUrl=media.url;
+ if(media.type==="file"){
+  const v=document.createElement("video");v.src=media.url;v.controls=false;v.playsInline=true;v.preload="metadata";
+  v.addEventListener("loadedmetadata",()=>{updateProgress(0,v.duration);if(playback)applyPlayback(playback);});
+  v.addEventListener("timeupdate",()=>{if(!suppressPlayerEvents)updateProgress(v.currentTime,v.duration);});
+  v.addEventListener("play",()=>updatePlayButton());v.addEventListener("pause",()=>updatePlayButton());
+  v.addEventListener("ended",()=>{if(isOwner)sendPlayback("pause",v.currentTime);});
+  v.addEventListener("error",()=>toast("Не удалось загрузить видеофайл."));
+  $("playerStage").append(v);mediaElement=v;if(playback)applyPlayback(playback);
+  return;
+ }
+ const id=youtubeId(media.url);if(!id){toast("Некорректная ссылка YouTube.");return;}
+ if(!window.YT?.Player){const wait=document.createElement("p");wait.className="empty-player";wait.textContent="Загружается YouTube…";$("playerStage").append(wait);return;}
+ const mount=document.createElement("div");mount.id="youtubePlayer";$("playerStage").append(mount);
+ ytPlayer=new YT.Player("youtubePlayer",{videoId:id,width:"100%",height:"100%",playerVars:{playsinline:1,rel:0,enablejsapi:1},events:{
+  onReady:()=>{if(playback)applyPlayback(playback);},
+  onStateChange:e=>{if(!isOwner||suppressPlayerEvents||!ytPlayer)return;if(e.data===YT.PlayerState.PLAYING)sendPlayback("play",ytPlayer.getCurrentTime());if(e.data===YT.PlayerState.PAUSED)sendPlayback("pause",ytPlayer.getCurrentTime());updatePlayButton();},
+  onError:()=>toast("YouTube не разрешил воспроизвести это видео.")
+ }});
 }
-function renderParticipants(list) {
-  $("peopleCount").textContent = list.length;
-  $("peopleList").innerHTML = list.map(person => `<div class="person"><div class="avatar">${escapeText((person.name || "?").slice(0, 1).toUpperCase())}</div><span class="person-name">${escapeText(person.name)}</span>${person.isOwner ? '<span class="person-role">Владелец</span>' : ""}</div>`).join("");
+function youtubeId(value){try{const u=new URL(value),h=u.hostname.toLowerCase();if(h==="youtu.be")return u.pathname.slice(1).split("/")[0];if(!["youtube.com","www.youtube.com","m.youtube.com"].includes(h))return null;return u.pathname==="/watch"?u.searchParams.get("v"):u.pathname.split("/")[2]||null;}catch{return null;}}
+function fmt(s){if(!Number.isFinite(s))return"00:00";s=Math.max(0,Math.floor(s));const h=Math.floor(s/3600),m=Math.floor(s/60)%60,x=s%60;return h?`${h}:${String(m).padStart(2,"0")}:${String(x).padStart(2,"0")}`:`${String(m).padStart(2,"0")}:${String(x).padStart(2,"0")}`;}
+function updateProgress(t,d){$("timeLabel").textContent=fmt(t);if(Number.isFinite(d)&&d>0){$("durationLabel").textContent=fmt(d);$("seekBar").max=Math.floor(d);if(document.activeElement!==$("seekBar"))$("seekBar").value=Math.min(t,d);}}
+function playerTime(){return mediaElement?.currentTime??ytPlayer?.getCurrentTime?.()??currentRoom?.playback?.currentTime??0;}
+function updatePlayButton(){const playing=mediaElement?!mediaElement.paused:ytPlayer?.getPlayerState?.()===1;$("playBtn").textContent=playing?"Ⅱ":"▶";$("playBtn").title=playing?"Пауза":"Воспроизвести";}
+function applyPlayback(state){
+ if(!state||!currentRoom)return;const target=Math.max(0,state.currentTime+(state.playing?Math.max(0,Date.now()-state.updatedAt)/1000:0));suppressPlayerEvents=true;
+ if(mediaElement){const apply=()=>{if(!mediaElement)return;try{if(Math.abs(mediaElement.currentTime-target)>1.3)mediaElement.currentTime=target;if(state.playing)mediaElement.play().catch(()=>toast("Нажми воспроизведение, чтобы разрешить запуск."));else mediaElement.pause();updateProgress(target,mediaElement.duration);}catch(e){console.warn(e);}};if(mediaElement.readyState>=1)apply();else mediaElement.addEventListener("loadedmetadata",apply,{once:true});}
+ else if(ytPlayer?.seekTo){try{if(Math.abs(ytPlayer.getCurrentTime()-target)>1.3)ytPlayer.seekTo(target,true);state.playing?ytPlayer.playVideo():ytPlayer.pauseVideo();}catch(e){console.warn(e);}}
+ clearTimeout(applyPlayback.timer);applyPlayback.timer=setTimeout(()=>{suppressPlayerEvents=false;updatePlayButton();},800);
 }
-function clearMedia() {
-  $("playerStage").innerHTML = '<div class="empty-player"><div class="play-orb">▶</div><h3>Что будем смотреть?</h3><p>Владелец комнаты может добавить видео с YouTube или загрузить файл.</p></div>';
-  $("mediaTitle").textContent = "Видео пока не выбрано";
-  $("timeLabel").textContent = "00:00";
-  $("durationLabel").textContent = "00:00";
-  $("seekBar").value = 0;
-  mediaElement = null;
-  destroyYouTube();
+function sendPlayback(action,time=playerTime()){if(isOwner&&currentRoom?.media)socket.emit("playback:control",{action,currentTime:time});}
+function renderMessage(m){
+ const box=$("chatMessages");if(box.querySelector(".chat-empty"))box.replaceChildren();const el=document.createElement("div");el.className=m.system?"system-message":"message";
+ if(m.system)el.textContent=m.text;else{const t=new Date(m.time);const stamp=Number.isNaN(t.getTime())?"":t.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});el.innerHTML=`<div class="message-meta"><b>${esc(m.name)}</b>${m.isOwner?'<span class="person-role">Владелец</span>':""}<time>${esc(stamp)}</time></div><p>${esc(m.text)}</p>`;}
+ box.append(el);box.scrollTop=box.scrollHeight;
 }
-function destroyYouTube() {
-  if (ytPlayer?.destroy) { try { ytPlayer.destroy(); } catch {} }
-  ytPlayer = null;
+async function createRoom(){setError("");const r=await emitReply("room:create",{name:nickname(),sessionId,roomName:"Комната просмотра"});if(!r?.ok)return setError(r?.error);sessionId=r.sessionId||sessionId;localStorage.setItem(SESSION_KEY,sessionId);enterRoom(r.room);renderMessage({system:true,text:"Комната создана. Отправь друзьям код приглашения."});}
+async function joinRoom(code=$("roomCode").value.trim().toUpperCase()){setError("");if(code.length!==6)return setError("Введи код из 6 символов.");const r=await emitReply("room:join",{code,name:nickname(),sessionId});if(!r?.ok)return setError(r?.error);sessionId=r.sessionId||sessionId;localStorage.setItem(SESSION_KEY,sessionId);enterRoom(r.room);}
+function explicitLeave(){stopVoice();socket.emit("room:leave");currentRoom=null;isOwner=false;localStorage.removeItem(ROOM_KEY);clearMedia();showHome();}
+function switchTab(tab){document.querySelectorAll(".source-tab").forEach(b=>b.classList.toggle("active",b.dataset.tab===tab));$("youtubePanel").classList.toggle("hidden",tab!=="youtube");$("filePanel").classList.toggle("hidden",tab!=="file");}
+async function loadLibrary(){
+ try{const r=await fetch("/api/library");const data=await r.json();const list=$("libraryList");list.replaceChildren();
+  if(!data.items?.length){list.innerHTML='<p class="hint">Пока нет сохранённых видео.</p>';return;}
+  data.items.forEach(item=>{const row=document.createElement("div");row.className="library-item";const info=document.createElement("div");info.className="library-info";const name=document.createElement("b");name.textContent=item.name;const meta=document.createElement("small");meta.textContent=`${(item.size/1024/1024).toFixed(1)} МБ`;info.append(name,meta);const use=document.createElement("button");use.textContent="Выбрать";use.addEventListener("click",()=>{if(!isOwner)return;socket.emit("media:set",{media:{type:"file",url:item.url,title:item.name}});});const del=document.createElement("button");del.textContent="Удалить";del.className="library-delete";del.addEventListener("click",async()=>{if(!confirm("Удалить видео из библиотеки?"))return;const response=await fetch(`/api/library/${encodeURIComponent(item.id)}`,{method:"DELETE"});if(response.ok)loadLibrary();else toast("Не удалось удалить видео.");});row.append(info,use,del);list.append(row);});
+ }catch{toast("Не удалось загрузить библиотеку.");}
 }
-function renderMedia(media, playback) {
-  if (!media) return clearMedia();
-  $("mediaTitle").textContent = media.title || "Видео";
-  const renderedUrl = $("playerStage").dataset.mediaUrl;
-  if (renderedUrl === media.url && (mediaElement || ytPlayer)) {
-    if (playback) applyPlayback(playback);
-    return;
-  }
-  destroyYouTube();
-  mediaElement = null;
-  $("playerStage").replaceChildren();
-  $("playerStage").dataset.mediaUrl = media.url;
-  if (media.type === "file") {
-    const video = document.createElement("video");
-    video.src = media.url;
-    video.controls = false;
-    video.playsInline = true;
-    video.preload = "metadata";
-    video.addEventListener("loadedmetadata", () => {
-      $("durationLabel").textContent = fmt(video.duration);
-      if (playback) applyPlayback(playback);
-    });
-    video.addEventListener("timeupdate", () => {
-      if (!suppressPlayerEvents) updateProgress(video.currentTime, video.duration);
-    });
-    video.addEventListener("ended", () => { if (isOwner) sendPlayback("pause", video.currentTime); });
-    video.addEventListener("error", () => toast("Не удалось загрузить видеофайл."));
-    $("playerStage").appendChild(video);
-    mediaElement = video;
-    if (playback) applyPlayback(playback);
-    return;
-  }
-  const id = youtubeId(media.url);
-  if (!id) { $("playerStage").textContent = "Не удалось распознать ссылку YouTube."; return; }
-  if (!window.YT?.Player) {
-    $("playerStage").innerHTML = '<div class="empty-player"><p>Загружается плеер YouTube…</p></div>';
-    return;
-  }
-  const mount = document.createElement("div");
-  mount.id = "youtubePlayer";
-  $("playerStage").appendChild(mount);
-  ytPlayer = new YT.Player("youtubePlayer", {
-    videoId: id,
-    width: "100%",
-    height: "100%",
-    playerVars: { playsinline: 1, rel: 0, enablejsapi: 1 },
-    events: {
-      onReady: () => { if (playback) applyPlayback(playback); },
-      onStateChange: event => {
-        if (!isOwner || suppressPlayerEvents || !ytPlayer) return;
-        if (event.data === YT.PlayerState.PLAYING) sendPlayback("play", ytPlayer.getCurrentTime());
-        if (event.data === YT.PlayerState.PAUSED) sendPlayback("pause", ytPlayer.getCurrentTime());
-      },
-      onError: () => toast("YouTube не разрешил воспроизвести это видео.")
-    }
-  });
+function uploadVideo(file){
+ return new Promise((resolve,reject)=>{const xhr=new XMLHttpRequest();xhr.open("POST","/api/upload");xhr.upload.onprogress=e=>{if(e.lengthComputable){const p=Math.round(e.loaded/e.total*100);$("uploadProgress").value=p;$("uploadProgressLabel").textContent=`Загрузка: ${p}%`;}};xhr.onload=()=>{let data={};try{data=JSON.parse(xhr.responseText);}catch{};xhr.status>=200&&xhr.status<300?resolve(data):reject(new Error(data.error||"Ошибка загрузки"));};xhr.onerror=()=>reject(new Error("Ошибка сети при загрузке."));const fd=new FormData();fd.append("video",file);xhr.send(fd);});
 }
-function youtubeId(value) {
-  try {
-    const url = new URL(value);
-    const host = url.hostname.toLowerCase();
-    if (host === "youtu.be") return url.pathname.slice(1).split("/")[0] || null;
-    if (!["youtube.com", "www.youtube.com", "m.youtube.com"].includes(host)) return null;
-    if (url.pathname === "/watch") return url.searchParams.get("v");
-    return url.pathname.split("/")[2] || null;
-  } catch { return null; }
+async function startVoice(){
+ if(!currentRoom)return;if(!navigator.mediaDevices?.getUserMedia||!window.RTCPeerConnection)return toast("Голосовая связь требует HTTPS и поддержки WebRTC.");
+ try{localStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true},video:false});$("micBtn").classList.add("active");$("micBtn").textContent="🎙 Выключить микрофон";$("voiceStatus").textContent="Микрофон включён";socket.emit("voice:ready");currentRoom.participants.filter(p=>p.id!==sessionId).forEach(p=>makePeer(p.id,sessionId.localeCompare(p.id)<0));}
+ catch(e){localStream=null;toast(e.name==="NotAllowedError"?"Разреши доступ к микрофону в настройках браузера.":"Не удалось включить микрофон.");}
 }
-function fmt(seconds) {
-  if (!Number.isFinite(seconds)) return "00:00";
-  const value = Math.max(0, Math.floor(seconds));
-  const hours = Math.floor(value / 3600);
-  const mins = Math.floor(value / 60) % 60;
-  const secs = value % 60;
-  return hours ? `${hours}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}` : `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+function makePeer(id,initiator){
+ if(!localStream||peers.has(id))return;const pc=new RTCPeerConnection({iceServers});peers.set(id,pc);localStream.getTracks().forEach(t=>pc.addTrack(t,localStream));
+ pc.onicecandidate=e=>{if(e.candidate)socket.emit("voice:signal",{to:id,data:{candidate:e.candidate}});};
+ pc.ontrack=e=>{let a=remoteAudio.get(id);if(!a){a=document.createElement("audio");a.autoplay=true;a.playsInline=true;document.body.append(a);remoteAudio.set(id,a);}a.srcObject=e.streams[0];a.play().catch(()=>{});};
+ pc.onconnectionstatechange=()=>{if(["failed","closed"].includes(pc.connectionState))removePeer(id);};
+ if(initiator)pc.createOffer().then(o=>pc.setLocalDescription(o)).then(()=>socket.emit("voice:signal",{to:id,data:{description:pc.localDescription}})).catch(console.warn);
 }
-function updateProgress(time, duration) {
-  $("timeLabel").textContent = fmt(time);
-  if (Number.isFinite(duration) && duration > 0) {
-    $("durationLabel").textContent = fmt(duration);
-    $("seekBar").max = Math.floor(duration);
-    if (document.activeElement !== $("seekBar")) $("seekBar").value = Math.min(time, duration);
-  }
+function removePeer(id){const p=peers.get(id);if(p){p.onconnectionstatechange=null;p.close();peers.delete(id);}const a=remoteAudio.get(id);if(a){a.srcObject=null;a.remove();remoteAudio.delete(id);}}
+socket.on("voice:peer-joined",({id})=>{if(localStream&&id)makePeer(id,sessionId.localeCompare(id)<0);});
+socket.on("voice:peer-left",({id})=>removePeer(id));
+socket.on("voice:signal",async({from,data})=>{if(!localStream||!from||!data)return;if(!peers.has(from))makePeer(from,false);const pc=peers.get(from);if(!pc)return;try{if(data.description){await pc.setRemoteDescription(data.description);if(data.description.type==="offer"){const answer=await pc.createAnswer();await pc.setLocalDescription(answer);socket.emit("voice:signal",{to:from,data:{description:pc.localDescription}});}}else if(data.candidate)await pc.addIceCandidate(data.candidate);}catch(e){console.warn(e);}});
+function stopVoice(){localStream?.getTracks().forEach(t=>t.stop());localStream=null;[...peers.keys()].forEach(removePeer);$("micBtn").classList.remove("active");$("micBtn").textContent="🎙 Включить микрофон";$("voiceStatus").textContent="Микрофон выключен";}
+async function toggleFullscreen(){
+ const stage=$("playerStage"),target=stage.querySelector("video")||stage.querySelector("iframe")?.parentElement||stage;
+ try{if(document.fullscreenElement)await document.exitFullscreen();else if(target.requestFullscreen)await target.requestFullscreen();else if(stage.webkitEnterFullscreen)stage.webkitEnterFullscreen();else toast("Полноэкранный режим не поддерживается этим браузером.");}
+ catch{toast("Браузер не разрешил полноэкранный режим.");}
 }
-function playerTime() {
-  if (mediaElement) return mediaElement.currentTime || 0;
-  if (ytPlayer?.getCurrentTime) return ytPlayer.getCurrentTime() || 0;
-  return currentRoom?.playback?.currentTime || 0;
-}
-function applyPlayback(state) {
-  if (!state || !currentRoom) return;
-  const elapsed = state.playing ? Math.max(0, Date.now() - state.updatedAt) / 1000 : 0;
-  const target = Math.max(0, state.currentTime + elapsed);
-  suppressPlayerEvents = true;
-  clearTimeout(syncTimeout);
-  if (mediaElement) {
-    const sync = () => {
-      if (!mediaElement) return;
-      try {
-        // Avoid needless seeks to reduce stutter; correct drift above 1.25s.
-        if (!Number.isFinite(mediaElement.currentTime) || Math.abs(mediaElement.currentTime - target) > 1.25) mediaElement.currentTime = target;
-        if (state.playing) mediaElement.play().catch(() => toast("Нажми «Воспроизвести» на устройстве, чтобы разрешить звук."));
-        else mediaElement.pause();
-        updateProgress(target, mediaElement.duration);
-      } catch (error) { console.warn("Playback sync failed", error); }
-    };
-    if (mediaElement.readyState >= 1) sync();
-    else mediaElement.addEventListener("loadedmetadata", sync, { once: true });
-  } else if (ytPlayer?.seekTo) {
-    try {
-      const current = ytPlayer.getCurrentTime?.() || 0;
-      if (Math.abs(current - target) > 1.25) ytPlayer.seekTo(target, true);
-      if (state.playing) ytPlayer.playVideo(); else ytPlayer.pauseVideo();
-    } catch (error) { console.warn("YouTube sync failed", error); }
-  }
-  syncTimeout = setTimeout(() => { suppressPlayerEvents = false; }, 700);
-}
-function sendPlayback(action, time = playerTime()) {
-  if (isOwner && currentRoom?.media) socket.emit("playback:control", { action, currentTime: time });
-}
-function switchTab(tab) {
-  document.querySelectorAll(".source-tab").forEach(button => button.classList.toggle("active", button.dataset.tab === tab));
-  $("youtubePanel").classList.toggle("hidden", tab !== "youtube");
-  $("filePanel").classList.toggle("hidden", tab !== "file");
-}
-function appendMessage(message) {
-  const box = $("chatMessages");
-  if (box.querySelector(".chat-empty")) box.replaceChildren();
-  const element = document.createElement("div");
-  element.className = message.system ? "system-message" : "message";
-  if (message.system) element.textContent = message.text;
-  else {
-    const time = new Date(message.time);
-    const timeText = Number.isNaN(time.getTime()) ? "" : time.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    element.innerHTML = `<div class="message-meta"><b>${escapeText(message.name)}</b>${message.isOwner ? '<span class="person-role">Владелец</span>' : ""}<time>${escapeText(timeText)}</time></div><p>${escapeText(message.text)}</p>`;
-  }
-  box.appendChild(element);
-  box.scrollTop = box.scrollHeight;
-}
-async function createRoom() {
-  setError("");
-  const result = await emitWithReply("room:create", { name: nickname(), roomName: "Комната просмотра" });
-  if (!result?.ok) return setError(result?.error || "Не удалось создать комнату.");
-  enterRoom(result.room);
-  appendMessage({ system: true, text: "Комната создана. Отправь друзьям код приглашения." });
-}
-async function joinRoom() {
-  setError("");
-  const code = $("roomCode").value.trim().toUpperCase();
-  if (code.length !== 6) return setError("Введи код из 6 символов.");
-  const result = await emitWithReply("room:join", { code, name: nickname() });
-  if (!result?.ok) return setError(result?.error || "Не удалось войти.");
-  enterRoom(result.room);
-  appendMessage({ system: true, text: "Ты присоединился(ась) к комнате." });
-}
-function leaveRoom() {
-  stopVoice();
-  socket.emit("room:leave");
-  currentRoom = null;
-  isOwner = false;
-  clearMedia();
-  $("chatMessages").innerHTML = '<div class="chat-empty">Сообщения появятся здесь. Напиши первым!</div>';
-  showHome();
-}
-async function startVoice() {
-  if (!currentRoom) return;
-  if (!navigator.mediaDevices?.getUserMedia || !window.RTCPeerConnection) return toast("Голосовой чат требует браузер с WebRTC и HTTPS (или localhost).");
-  try {
-    localStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true }, video: false });
-    $("micBtn").classList.add("active");
-    $("micBtn").textContent = "🎙 Выключить микрофон";
-    $("voiceStatus").textContent = "Микрофон включён";
-    socket.emit("voice:ready");
-    currentRoom.participants.filter(person => person.id !== socket.id).forEach(person => makePeer(person.id, socket.id.localeCompare(person.id) < 0));
-  } catch (error) {
-    localStream = null;
-    toast(error.name === "NotAllowedError" ? "Разреши доступ к микрофону в браузере." : "Не удалось включить микрофон. Проверь устройство и HTTPS.");
-  }
-}
-function makePeer(id, initiator) {
-  if (!localStream || peers.has(id)) return;
-  const pc = new RTCPeerConnection({ iceServers });
-  peers.set(id, pc);
-  localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
-  pc.onicecandidate = event => {
-    if (event.candidate) socket.emit("voice:signal", { to: id, data: { candidate: event.candidate } });
-  };
-  pc.ontrack = event => {
-    let audio = remoteAudio.get(id);
-    if (!audio) {
-      audio = document.createElement("audio");
-      audio.autoplay = true;
-      audio.playsInline = true;
-      audio.dataset.peer = id;
-      document.body.appendChild(audio);
-      remoteAudio.set(id, audio);
-    }
-    audio.srcObject = event.streams[0];
-    audio.play().catch(() => toast("Нажми на странице, чтобы включить входящий звук."));
-  };
-  pc.onconnectionstatechange = () => {
-    if (["failed", "closed"].includes(pc.connectionState)) removePeer(id);
-  };
-  if (initiator) pc.createOffer().then(offer => pc.setLocalDescription(offer)).then(() => {
-    socket.emit("voice:signal", { to: id, data: { description: pc.localDescription } });
-  }).catch(error => console.warn("Voice offer failed", error));
-}
-function removePeer(id) {
-  const pc = peers.get(id);
-  if (pc) { pc.onconnectionstatechange = null; pc.close(); peers.delete(id); }
-  const audio = remoteAudio.get(id);
-  if (audio) { audio.srcObject = null; audio.remove(); remoteAudio.delete(id); }
-}
-socket.on("voice:peer-joined", ({ id }) => {
-  if (localStream && id) makePeer(id, socket.id.localeCompare(id) < 0);
+$("createBtn").addEventListener("click",createRoom);$("joinBtn").addEventListener("click",()=>joinRoom());$("roomCode").addEventListener("input",e=>e.target.value=e.target.value.toUpperCase().replace(/[^A-Z0-9]/g,"").slice(0,6));$("roomCode").addEventListener("keydown",e=>{if(e.key==="Enter")joinRoom();});
+$("leaveBtn").addEventListener("click",explicitLeave);$("copyCodeBtn").addEventListener("click",async()=>{if(!currentRoom)return;try{await navigator.clipboard.writeText(currentRoom.code);toast("Код скопирован.");}catch{toast(`Код группы: ${currentRoom.code}`);}});
+document.querySelectorAll(".source-tab").forEach(b=>b.addEventListener("click",()=>{switchTab(b.dataset.tab);if(b.dataset.tab==="file")loadLibrary();}));
+$("addYoutubeBtn").addEventListener("click",()=>{const url=$("youtubeUrl").value.trim();if(!isOwner||!youtubeId(url))return toast("Вставь корректную ссылку YouTube.");socket.emit("media:set",{media:{type:"youtube",url,title:"YouTube-видео"}});$("youtubeUrl").value="";});
+$("videoFile").addEventListener("change",async e=>{const f=e.target.files[0];if(!f)return;if(!f.type.startsWith("video/")){toast("Выбери видеофайл.");return;}if(f.size>2*1024*1024*1024){toast("Максимальный размер — 2 ГБ.");return;}$("uploadProgress").classList.remove("hidden");$("uploadProgressLabel").textContent="Подготовка…";try{const item=await uploadVideo(f);socket.emit("media:set",{media:{type:"file",url:item.url,title:item.name}});$("uploadStatus").textContent=`Сохранено в библиотеку: ${item.name}`;loadLibrary();}catch(err){$("uploadStatus").textContent=err.message;}finally{$("uploadProgress").classList.add("hidden");e.target.value="";}});
+$("playBtn").addEventListener("click",()=>{if(!isOwner||!currentRoom?.media)return;const playing=mediaElement?!mediaElement.paused:ytPlayer?.getPlayerState?.()===1;sendPlayback(playing?"pause":"play",playerTime());});
+$("backBtn").addEventListener("click",()=>sendPlayback("seek",Math.max(0,playerTime()-10)));$("forwardBtn").addEventListener("click",()=>sendPlayback("seek",playerTime()+10));$("seekBar").addEventListener("input",e=>updateProgress(Number(e.target.value),Number($("seekBar").max)));$("seekBar").addEventListener("change",e=>sendPlayback("seek",Number(e.target.value)));
+$("chatForm").addEventListener("submit",e=>{e.preventDefault();const t=$("chatInput").value.trim();if(t&&currentRoom){socket.emit("chat:send",{text:t});$("chatInput").value="";}});
+$("micBtn").addEventListener("click",()=>localStream?stopVoice():startVoice());$("fullscreenBtn").addEventListener("click",toggleFullscreen);$("fullscreenMicBtn").addEventListener("click",()=>localStream?stopVoice():startVoice());
+document.addEventListener("fullscreenchange",()=>{$("fullscreenOverlay").classList.toggle("hidden",!document.fullscreenElement);});
+$("fullscreenExitBtn").addEventListener("click",()=>document.exitFullscreen?.());
+socket.on("room:update",room=>{if(!currentRoom||room.code!==currentRoom.code)return;const prev=currentRoom.media?.url;currentRoom=room;isOwner=room.ownerId===sessionId;setOwnerControls();renderParticipants(room.participants||[]);if(room.media&&(room.media.url!==prev))renderMedia(room.media,room.playback);else if(!room.media)clearMedia();});
+socket.on("playback:update",s=>{if(currentRoom){currentRoom.playback=s;applyPlayback(s);setOwnerControls();}});
+socket.on("chat:message",renderMessage);socket.on("chat:system",t=>renderMessage({system:true,text:t}));socket.on("app:error",toast);
+socket.on("disconnect",()=>{if(currentRoom){toast("Соединение потеряно. Переподключаемся…");stopVoice();}});
+socket.on("connect",async()=>{
+ try{const r=await fetch("/api/voice-config",{cache:"no-store"});const c=await r.json();if(c.iceServers?.length)iceServers=c.iceServers;}catch{}
+ if(currentRoom){const r=await emitReply("room:join",{code:currentRoom.code,name:nickname(),sessionId});if(r?.ok)enterRoom(r.room);else{toast("Не удалось восстановить комнату. Проверь, не перезапускался ли сервер.");currentRoom=null;isOwner=false;localStorage.removeItem(ROOM_KEY);clearMedia();showHome();}}
+ else{let saved;try{saved=JSON.parse(localStorage.getItem(ROOM_KEY)||"null");}catch{}if(saved?.code){const r=await emitReply("room:join",{code:saved.code,name:nickname(),sessionId:saved.sessionId||sessionId});if(r?.ok)enterRoom(r.room);}}
 });
-socket.on("voice:peer-left", ({ id }) => removePeer(id));
-socket.on("voice:signal", async ({ from, data }) => {
-  if (!localStream || !from || !data) return;
-  if (!peers.has(from)) makePeer(from, false);
-  const pc = peers.get(from);
-  if (!pc) return;
-  try {
-    if (data.description) {
-      await pc.setRemoteDescription(data.description);
-      if (data.description.type === "offer") {
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        socket.emit("voice:signal", { to: from, data: { description: pc.localDescription } });
-      }
-    } else if (data.candidate) {
-      await pc.addIceCandidate(data.candidate);
-    }
-  } catch (error) { console.warn("Voice signaling failed", error); }
-});
-function stopVoice() {
-  localStream?.getTracks().forEach(track => track.stop());
-  localStream = null;
-  [...peers.keys()].forEach(removePeer);
-  $("micBtn").classList.remove("active");
-  $("micBtn").textContent = "🎙 Включить микрофон";
-  $("voiceStatus").textContent = "Микрофон выключен";
-}
-
-$("createBtn").addEventListener("click", createRoom);
-$("joinBtn").addEventListener("click", joinRoom);
-$("roomCode").addEventListener("input", event => { event.target.value = event.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6); });
-$("roomCode").addEventListener("keydown", event => { if (event.key === "Enter") joinRoom(); });
-$("leaveBtn").addEventListener("click", leaveRoom);
-$("copyCodeBtn").addEventListener("click", async () => {
-  if (!currentRoom) return;
-  try { await navigator.clipboard.writeText(currentRoom.code); toast("Код скопирован!"); }
-  catch { toast(`Код группы: ${currentRoom.code}`); }
-});
-document.querySelectorAll(".source-tab").forEach(button => button.addEventListener("click", () => switchTab(button.dataset.tab)));
-$("addYoutubeBtn").addEventListener("click", () => {
-  const url = $("youtubeUrl").value.trim();
-  if (!isOwner || !youtubeId(url)) return toast("Вставь корректную ссылку на YouTube.");
-  socket.emit("media:set", { media: { type: "youtube", url, title: "YouTube-видео" } });
-  $("youtubeUrl").value = "";
-});
-$("youtubeUrl").addEventListener("keydown", event => { if (event.key === "Enter") $("addYoutubeBtn").click(); });
-$("videoFile").addEventListener("change", async event => {
-  const file = event.target.files[0];
-  if (!file) return;
-  if (!file.type.startsWith("video/")) { toast("Выбери видеофайл."); event.target.value = ""; return; }
-  if (file.size > 500 * 1024 * 1024) { toast("Размер файла не должен превышать 500 МБ."); event.target.value = ""; return; }
-  $("uploadStatus").textContent = "Загружаю файл…";
-  const data = new FormData();
-  data.append("video", file);
-  try {
-    const response = await fetch("/api/upload", { method: "POST", body: data });
-    const result = await response.json();
-    if (!response.ok) throw new Error(result.error || "Ошибка загрузки");
-    socket.emit("media:set", { media: { type: "file", url: result.url, title: result.name } });
-    $("uploadStatus").textContent = `Файл загружен: ${result.name}`;
-  } catch (error) { $("uploadStatus").textContent = error.message; }
-  event.target.value = "";
-});
-$("playBtn").addEventListener("click", () => {
-  if (!isOwner || !currentRoom?.media) return;
-  if (mediaElement) sendPlayback(mediaElement.paused ? "play" : "pause", mediaElement.currentTime);
-  else if (ytPlayer?.getPlayerState) sendPlayback(ytPlayer.getPlayerState() === YT.PlayerState.PLAYING ? "pause" : "play", ytPlayer.getCurrentTime());
-});
-$("backBtn").addEventListener("click", () => sendPlayback("seek", Math.max(0, playerTime() - 10)));
-$("forwardBtn").addEventListener("click", () => sendPlayback("seek", playerTime() + 10));
-$("seekBar").addEventListener("change", event => sendPlayback("seek", Number(event.target.value)));
-$("chatForm").addEventListener("submit", event => {
-  event.preventDefault();
-  const text = $("chatInput").value.trim();
-  if (!text || !currentRoom) return;
-  socket.emit("chat:send", { text });
-  $("chatInput").value = "";
-});
-$("micBtn").addEventListener("click", () => localStream ? stopVoice() : startVoice());
-socket.on("room:update", room => {
-  if (!currentRoom || room.code !== currentRoom.code) return;
-  const priorUrl = currentRoom.media?.url;
-  const priorOwner = isOwner;
-  currentRoom = room;
-  isOwner = room.ownerId === socket.id;
-  setOwnerControls();
-  renderParticipants(room.participants || []);
-  if (room.media && (room.media.url !== priorUrl || priorOwner !== isOwner)) renderMedia(room.media, room.playback);
-  else if (!room.media) clearMedia();
-});
-socket.on("playback:update", state => {
-  if (!currentRoom) return;
-  currentRoom.playback = state;
-  applyPlayback(state);
-});
-socket.on("chat:message", appendMessage);
-socket.on("chat:system", text => appendMessage({ system: true, text }));
-socket.on("app:error", toast);
-socket.on("disconnect", () => {
-  if (currentRoom) {
-    toast("Соединение потеряно. Переподключаемся…");
-    stopVoice();
-  }
-});
-socket.on("connect", async () => {
-  try {
-    const response = await fetch("/api/voice-config", { cache: "no-store" });
-    const config = await response.json();
-    if (Array.isArray(config.iceServers) && config.iceServers.length) iceServers = config.iceServers;
-  } catch { /* STUN fallback stays available. */ }
-  // Reconnects use a fresh Socket.IO id; rejoin the existing room when possible.
-  if (currentRoom) {
-    const result = await emitWithReply("room:join", { code: currentRoom.code, name: nickname() });
-    if (result?.ok) enterRoom(result.room);
-    else { currentRoom = null; isOwner = false; clearMedia(); showHome(); toast("Комната уже закрыта. Создай новую или войди по коду."); }
-  }
-});
-setInterval(() => {
-  if (!currentRoom?.media) return;
-  if (mediaElement) updateProgress(mediaElement.currentTime, mediaElement.duration);
-  else if (ytPlayer?.getCurrentTime) updateProgress(ytPlayer.getCurrentTime(), ytPlayer.getDuration());
-}, 1000);
+setInterval(()=>{if(currentRoom?.media){if(mediaElement)updateProgress(mediaElement.currentTime,mediaElement.duration);else if(ytPlayer?.getCurrentTime)updateProgress(ytPlayer.getCurrentTime(),ytPlayer.getDuration());}},1000);
