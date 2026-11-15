@@ -5,8 +5,9 @@
   "description": "WatchTogether",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js"
+    "start": "node scripts/repair-frontend.js && node server.js",
+    "dev": "node scripts/repair-frontend.js && node --watch server.js",
+    "test": "node scripts/repair-frontend.js"
   },
   "engines": {
     "node": ">=20"
