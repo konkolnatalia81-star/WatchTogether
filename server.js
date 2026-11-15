@@ -18,7 +18,15 @@ const ROOMS_FILE=path.join(DATA_DIR,'rooms.json');
 const MAX_UPLOAD=2*1024*1024*1024,CHUNK_SIZE=8*1024*1024,ROOM_CAPACITY=12,GRACE=10*60*1000;
 for(const d of [DATA_DIR,UPLOAD_DIR,CHUNK_DIR,path.join(UPLOAD_DIR,'variants')])fs.mkdirSync(d,{recursive:true});
 app.disable('x-powered-by');app.use(express.json({limit:'100kb'}));
-app.use(express.static(path.join(__dirname,'public'),{etag:true,maxAge:'1h'}));
+app.use(express.static(path.join(__dirname,'public'),{
+  etag:true,
+  maxAge:0,
+  setHeaders(res,filePath){
+    if(filePath.endsWith('app.js')||filePath.endsWith('index.html')){
+      res.setHeader('Cache-Control','no-store');
+    }
+  }
+}));
 app.use('/uploads',express.static(UPLOAD_DIR,{acceptRanges:true,setHeaders:r=>r.setHeader('X-Content-Type-Options','nosniff')}));
 const readJson=(f,def)=>{try{return JSON.parse(fs.readFileSync(f,'utf8'))}catch{return def}};
 let library=readJson(LIBRARY_FILE,[]);if(!Array.isArray(library))library=[];
