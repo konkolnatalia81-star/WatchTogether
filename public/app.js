@@ -1,136 +1,97 @@
-const socket = io({ reconnection:true, reconnectionAttempts:Infinity, reconnectionDelay:1000, reconnectionDelayMax:8000 });
-const $ = id => document.getElementById(id);
-let currentRoom=null, isOwner=false, mediaElement=null, ytPlayer=null, suppressPlayerEvents=false, localStream=null;
-let iceServers=[{urls:"stun:stun.l.google.com:19302"}];
-const peers=new Map(), remoteAudio=new Map();
-const SESSION_KEY="wt_session_v2", ROOM_KEY="wt_room_v2", NAME_KEY="wt_name_v2";
-let sessionId=localStorage.getItem(SESSION_KEY);
-if(!sessionId){sessionId=crypto.randomUUID();localStorage.setItem(SESSION_KEY,sessionId);}
-$("nickname").value=localStorage.getItem(NAME_KEY)||"";
-window.onYouTubeIframeAPIReady=()=>{if(currentRoom?.media?.type==="youtube")renderMedia(currentRoom.media,currentRoom.playback);};
-function toast(msg){$("toast").textContent=msg;$("toast").classList.add("show");clearTimeout(toast.timer);toast.timer=setTimeout(()=>$("toast").classList.remove("show"),3000);}
-function nickname(){const n=$("nickname").value.trim()||"Гость";localStorage.setItem(NAME_KEY,n);return n;}
-function setError(v){$("homeError").textContent=v||"";}
-function showHome(){$("home").classList.remove("hidden");$("roomView").classList.add("hidden");}
-function showRoom(){$("home").classList.add("hidden");$("roomView").classList.remove("hidden");}
-function emitReply(event,data){return new Promise(resolve=>{if(!socket.connected)return resolve({ok:false,error:"Нет соединения с сервером."});socket.timeout(12000).emit(event,data,(err,result)=>resolve(err?{ok:false,error:"Сервер не ответил."}:result));});}
-function esc(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
-function setOwnerControls(){
- $("ownerTools").classList.toggle("hidden",!isOwner);$("ownerHint").textContent=isOwner?"Ты управляешь видео":"Управляет владелец";
- ["playBtn","backBtn","forwardBtn","seekBar"].forEach(id=>$(id).disabled=!isOwner);
- $("playBtn").textContent=currentRoom?.playback?.playing?"Ⅱ":"▶";
+'use strict';
+const socket=io({reconnection:true,reconnectionAttempts:Infinity,reconnectionDelay:1000,reconnectionDelayMax:8000});
+const $=id=>document.getElementById(id);
+const SESSION_KEY='wt_session_v2',ROOM_KEY='wt_room_v2',NAME_KEY='wt_name_v2',UPLOAD_KEY='wt_upload_resume_v1';
+let sessionId=localStorage.getItem(SESSION_KEY)||crypto.randomUUID();localStorage.setItem(SESSION_KEY,sessionId);
+let currentRoom=null,isOwner=false,mediaElement=null,ytPlayer=null,localStream=null,iceServers=[{urls:'stun:stun.l.google.com:19302'}],suppress=false;
+const peers=new Map(),remoteAudio=new Map();let analyser=null,audioContext=null,vadTimer=null,lastSpeaking=false;
+$('nickname').value=localStorage.getItem(NAME_KEY)||'';
+window.onYouTubeIframeAPIReady=()=>{if(currentRoom?.media?.type==='youtube')renderMedia(currentRoom.media,currentRoom.playback)};
+function toast(t){$('toast').textContent=t;$('toast').classList.add('show');clearTimeout(toast.timer);toast.timer=setTimeout(()=>$('toast').classList.remove('show'),3500)}
+function name(){const n=$('nickname').value.trim()||'Гость';localStorage.setItem(NAME_KEY,n);return n}
+function err(t){$('homeError').textContent=t||''}
+function home(){ $('home').classList.remove('hidden');$('roomView').classList.add('hidden') }
+function roomView(){ $('home').classList.add('hidden');$('roomView').classList.remove('hidden') }
+function reply(ev,data){return new Promise(resolve=>{if(!socket.connected)return resolve({ok:false,error:'Нет соединения.'});socket.timeout(15000).emit(ev,data,(e,r)=>resolve(e?{ok:false,error:'Сервер не ответил.'}:r))})}
+function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function controls(){ $('ownerTools').classList.toggle('hidden',!isOwner);$('ownerHint').textContent=isOwner?'Ты управляешь видео':'Управляет владелец';['playBtn','backBtn','forwardBtn','seekBar'].forEach(id=>$(id).disabled=!isOwner);$('stopMediaBtn').classList.toggle('hidden',!isOwner);$('stopMediaTopBtn').classList.toggle('hidden',!isOwner||!currentRoom?.media);$('stopRequestBtn').classList.toggle('hidden',isOwner||!currentRoom?.media);$('playBtn').textContent=currentRoom?.playback?.playing?'Ⅱ':'▶'; }
+function enterRoom(r){const changed=currentRoom?.code!==r.code;currentRoom=r;isOwner=r.ownerId===sessionId;$('roomTitle').textContent=r.name;$('roomCodeDisplay').textContent=r.code;localStorage.setItem(ROOM_KEY,JSON.stringify({code:r.code,sessionId}));controls();people(r.participants||[]);if(r.media)renderMedia(r.media,r.playback);else clearMedia();roomView();if(changed)$('chatMessages').innerHTML='<div class="chat-empty">Сообщения появятся здесь. Напиши первым!</div>';loadLibrary()}
+function people(list){$('peopleCount').textContent=list.length;$('peopleList').innerHTML=list.map(p=>`<div class="person"><div class="avatar">${esc((p.name||'?').slice(0,1).toUpperCase())}</div><span class="person-name">${esc(p.name)}</span>${p.speaking?'<span class="speaking-pill">ГОВОРИТ</span>':''}${p.isOwner?'<span class="person-role">Владелец</span>':''}</div>`).join('')}
+function destroyYT(){try{ytPlayer?.destroy?.()}catch{}ytPlayer=null}
+function clearMedia(){destroyYT();mediaElement=null;$('playerStage').replaceChildren();$('playerStage').dataset.mediaUrl='';const e=document.createElement('div');e.className='empty-player';e.innerHTML='<div class="play-orb">▶</div><h3>Что будем смотреть?</h3><p>Владелец может добавить видео, ссылку или встроенный плеер.</p>';$('playerStage').append(e);$('mediaTitle').textContent='Видео пока не выбрано';$('qualityWrap').classList.add('hidden');$('timeLabel').textContent='00:00';$('durationLabel').textContent='00:00';$('seekBar').value=0;controls()}
+function youtubeId(v){try{const u=new URL(v),h=u.hostname.toLowerCase();if(h==='youtu.be')return u.pathname.slice(1).split('/')[0];if(['youtube.com','www.youtube.com','m.youtube.com'].includes(h))return u.searchParams.get('v')||u.pathname.split('/')[2]||null}catch{}return null}
+function renderMedia(m,state){if(!m)return clearMedia();$('mediaTitle').textContent=m.title||'Видео';if($('playerStage').dataset.mediaUrl===`${m.url}|${m.playUrl||m.url}`&&(mediaElement||ytPlayer||$('playerStage').querySelector('iframe'))){if(m.type==='file'){const old=$('qualitySelect').value,vs=(m.variants||[{label:'original',url:m.url}]).filter(x=>x.url);$('qualitySelect').replaceChildren();vs.forEach(x=>{const o=document.createElement('option');o.value=x.url;o.textContent=x.label==='original'?'Оригинал':x.label;$('qualitySelect').append(o)});$('qualitySelect').value=vs.some(x=>x.url===old)?old:m.url}if(state)applyPlayback(state);return}destroyYT();mediaElement=null;$('playerStage').replaceChildren();$('playerStage').dataset.mediaUrl=`${m.url}|${m.playUrl||m.url}`;$('qualitySelect').replaceChildren();$('qualityWrap').classList.toggle('hidden',m.type!=='file');
+ if(m.type==='file'||m.type==='direct'){const v=document.createElement('video');v.playsInline=true;v.preload='metadata';v.controls=false;v.src=m.playUrl||m.url;v.style.objectFit='contain';v.addEventListener('loadedmetadata',()=>{updateProgress(0,v.duration);if(state)applyPlayback(state)});v.addEventListener('timeupdate',()=>{if(!suppress)updateProgress(v.currentTime,v.duration)});v.addEventListener('error',()=>toast('Не удалось загрузить видео. Возможно, источник недоступен.'));v.addEventListener('ended',()=>{if(isOwner)send('pause',v.currentTime)});$('playerStage').append(v);mediaElement=v;if(m.type==='file'){const variants=(m.variants||[{label:'original',url:m.url}]).filter(x=>x.url);variants.forEach(x=>{const o=document.createElement('option');o.value=x.url;o.textContent=x.label==='original'?'Оригинал':x.label;$('qualitySelect').append(o)});$('qualitySelect').value=m.playUrl||m.url}if(state)applyPlayback(state);return}
+ if(m.type==='youtube'){const id=youtubeId(m.url);if(!id)return toast('Некорректная ссылка YouTube.');if(!window.YT?.Player){const w=document.createElement('p');w.className='empty-player';w.textContent='Загружается YouTube…';$('playerStage').append(w);return}const mount=document.createElement('div');mount.id='youtubePlayer';$('playerStage').append(mount);ytPlayer=new YT.Player('youtubePlayer',{videoId:id,width:'100%',height:'100%',playerVars:{playsinline:1,rel:0,controls:0,disablekb:1},events:{onReady:()=>state&&applyPlayback(state),onError:()=>toast('YouTube не разрешил воспроизведение.')}});return}
+ if(m.type==='external'){const frame=document.createElement('iframe');frame.src=m.url;frame.title=m.title||'Внешний плеер';frame.allow='autoplay; encrypted-media; picture-in-picture; fullscreen';frame.allowFullscreen=true;frame.referrerPolicy='strict-origin-when-cross-origin';frame.sandbox='allow-scripts allow-same-origin allow-presentation allow-forms';$('playerStage').append(frame);toast('Если сайт запрещает встраивание, его плеер не откроется.');return}}
+function fmt(s){if(!Number.isFinite(s))return'00:00';s=Math.max(0,Math.floor(s));const h=Math.floor(s/3600),m=Math.floor(s/60)%60,x=s%60;return h?`${h}:${String(m).padStart(2,'0')}:${String(x).padStart(2,'0')}`:`${String(m).padStart(2,'0')}:${String(x).padStart(2,'0')}`}
+function updateProgress(t,d){$('timeLabel').textContent=fmt(t);if(Number.isFinite(d)&&d>0){$('durationLabel').textContent=fmt(d);$('seekBar').max=Math.floor(d);if(document.activeElement!==$('seekBar'))$('seekBar').value=Math.min(t,d)}}
+function time(){return mediaElement?.currentTime??ytPlayer?.getCurrentTime?.()??currentRoom?.playback?.currentTime??0}
+function applyPlayback(s){if(!s||!currentRoom)return;const t=Math.max(0,s.currentTime+(s.playing?Math.max(0,Date.now()-s.updatedAt)/1000:0));suppress=true;if(mediaElement){const go=()=>{if(!mediaElement)return;if(Math.abs(mediaElement.currentTime-t)>1.2)mediaElement.currentTime=t;if(s.playing)mediaElement.play().catch(()=>{});else mediaElement.pause();updateProgress(t,mediaElement.duration)};if(mediaElement.readyState>=1)go();else mediaElement.addEventListener('loadedmetadata',go,{once:true})}else if(ytPlayer?.seekTo){try{if(Math.abs(ytPlayer.getCurrentTime()-t)>1.2)ytPlayer.seekTo(t,true);s.playing?ytPlayer.playVideo():ytPlayer.pauseVideo()}catch{}}clearTimeout(applyPlayback.timer);applyPlayback.timer=setTimeout(()=>suppress=false,900)}
+function send(action,t=time()){if(isOwner&&currentRoom?.media)socket.emit('playback:control',{action,currentTime:t})}
+function message(m){const box=$('chatMessages');if(box.querySelector('.chat-empty'))box.replaceChildren();const el=document.createElement('div');el.className=m.system?'system-message':'message';if(m.system)el.textContent=m.text;else{const tm=new Date(m.time);el.innerHTML=`<div class="message-meta"><b>${esc(m.name)}</b>${m.isOwner?'<span class="person-role">Владелец</span>':''}<time>${esc(Number.isNaN(tm.getTime())?'':tm.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}))}</time></div><p>${esc(m.text)}</p>`}box.append(el);box.scrollTop=box.scrollHeight}
+async function createRoom(){err('');const r=await reply('room:create',{name:name(),sessionId,roomName:'Комната просмотра'});if(!r?.ok)return err(r?.error);sessionId=r.sessionId||sessionId;localStorage.setItem(SESSION_KEY,sessionId);enterRoom(r.room);message({system:true,text:'Комната создана. Отправь друзьям код приглашения.'})}
+async function joinRoom(c=$('roomCode').value.trim().toUpperCase()){err('');if(c.length!==6)return err('Введи код из 6 символов.');const r=await reply('room:join',{code:c,name:name(),sessionId});if(!r?.ok)return err(r?.error);enterRoom(r.room)}
+function exitRoom(){stopVoice();socket.emit('room:leave');currentRoom=null;isOwner=false;localStorage.removeItem(ROOM_KEY);clearMedia();home()}
+function tab(t){document.querySelectorAll('.source-tab').forEach(b=>b.classList.toggle('active',b.dataset.tab===t));$('youtubePanel').classList.toggle('hidden',t!=='youtube');$('filePanel').classList.toggle('hidden',t!=='file');$('externalPanel').classList.toggle('hidden',t!=='external');$('archivePanel').classList.toggle('hidden',t!=='archive');if(t==='file')loadLibrary()}
+async function loadLibrary(){try{const r=await fetch('/api/library'),d=await r.json(),list=$('libraryList');list.replaceChildren();if(!d.items?.length){list.innerHTML='<p class="hint">Пока нет сохранённых видео.</p>';return}d.items.forEach(item=>{const row=document.createElement('div');row.className='library-item';const info=document.createElement('div');info.className='library-info';const b=document.createElement('b');b.textContent=item.name;const sm=document.createElement('small');sm.textContent=`${(item.size/1048576).toFixed(1)} МБ · ${item.transcodeStatus==='processing'?'Готовятся качества…':'в библиотеке'}`;info.append(b,sm);const use=document.createElement('button');use.textContent='Выбрать';use.disabled=!isOwner;use.onclick=()=>socket.emit('media:set',{media:{type:'file',url:item.url,title:item.name,variants:item.variants}});row.append(info,use);if(isOwner){const del=document.createElement('button');del.textContent='Удалить';del.className='library-delete';del.onclick=async()=>{if(!confirm('Удалить видео из библиотеки?'))return;const x=await fetch(`/api/library/${item.id}`,{method:'DELETE',headers:{'x-wt-session':sessionId}});if(x.ok)loadLibrary();else toast('Не удалось удалить видео.')} ;row.append(del)}list.append(row)})}catch{toast('Не удалось загрузить библиотеку.')}}
+async 
+let archivePage=1,archiveTotal=0,archiveQuery='';
+async function searchArchive(page=1){
+ if(!isOwner)return;
+ const q=$('archiveSearchInput').value.trim();
+ if(q.length<2){$('archiveStatus').textContent='Введи минимум 2 символа.';return}
+ archiveQuery=q;archivePage=page;$('archiveStatus').textContent='Ищем фильмы…';$('archiveResults').replaceChildren();$('archivePrevBtn').disabled=true;$('archiveNextBtn').disabled=true;
+ try{
+  const r=await fetch(`/api/archive/search?q=${encodeURIComponent(q)}&page=${page}`),d=await r.json();
+  if(!r.ok)throw Error(d.error||'Не удалось выполнить поиск.');
+  archiveTotal=d.total||0;$('archivePageLabel').textContent=`Страница ${page}`;
+  $('archiveStatus').textContent=d.items.length?`Найдено результатов: ${archiveTotal.toLocaleString('ru-RU')}`:'Ничего не найдено. Попробуй другое название.';
+  d.items.forEach(item=>{
+   const card=document.createElement('article');card.className='archive-card';
+   const img=document.createElement('img');img.src=item.poster;img.alt='';img.loading='lazy';img.onerror=()=>img.remove();
+   const info=document.createElement('div');info.className='archive-card-info';
+   const title=document.createElement('b');title.textContent=item.title;
+   const meta=document.createElement('small');meta.textContent=[item.year,item.creator].filter(Boolean).join(' · ')||'Internet Archive';
+   const desc=document.createElement('p');desc.textContent=item.description||'Описание отсутствует.';
+   const rights=document.createElement('small');rights.className='archive-rights';rights.textContent=item.rights?`Права: ${item.rights}`:'Информация о правах не указана в результатах.';
+   const actions=document.createElement('div');actions.className='archive-card-actions';
+   const choose=document.createElement('button');choose.className='primary-btn compact';choose.textContent='Выбрать фильм';
+   choose.onclick=async()=>{
+    if(!isOwner)return toast('Только владелец может выбирать фильм.');
+    choose.disabled=true;choose.textContent='Открываем…';
+    try{
+     const response=await fetch(`/api/archive/item/${encodeURIComponent(item.id)}`),selected=await response.json();
+     if(!response.ok)throw Error(selected.error||'Фильм недоступен.');
+     socket.emit('media:set',{media:{type:'direct',url:selected.url,title:selected.title}});
+     toast('Фильм выбран для всей комнаты.');
+    }catch(e){toast(e.message)}finally{choose.disabled=false;choose.textContent='Выбрать фильм'}
+   };
+   const link=document.createElement('a');link.href=item.pageUrl;link.target='_blank';link.rel='noopener noreferrer';link.textContent='Страница фильма ↗';
+   actions.append(choose,link);info.append(title,meta,desc,rights,actions);card.append(img,info);$('archiveResults').append(card);
+  });
+  $('archivePrevBtn').disabled=page<=1;$('archiveNextBtn').disabled=page*12>=archiveTotal||d.items.length<12;
+ }catch(e){$('archiveStatus').textContent=e.message}
 }
-function enterRoom(room){
- const changed=currentRoom?.code!==room.code;currentRoom=room;isOwner=room.ownerId===sessionId;
- $("roomTitle").textContent=room.name;$("roomCodeDisplay").textContent=room.code;
- localStorage.setItem(ROOM_KEY,JSON.stringify({code:room.code,sessionId}));
- setOwnerControls();renderParticipants(room.participants||[]);
- if(room.media)renderMedia(room.media,room.playback);else clearMedia();
- showRoom();if(changed)$("chatMessages").innerHTML='<div class="chat-empty">Сообщения появятся здесь. Напиши первым!</div>';
-}
-function renderParticipants(list){
- $("peopleCount").textContent=list.length;
- $("peopleList").innerHTML=list.map(p=>`<div class="person"><div class="avatar">${esc((p.name||"?").slice(0,1).toUpperCase())}</div><span class="person-name">${esc(p.name)}</span>${p.isOwner?'<span class="person-role">Владелец</span>':""}</div>`).join("");
-}
-function destroyYouTube(){try{ytPlayer?.destroy?.();}catch{}ytPlayer=null;}
-function clearMedia(){
- $("playerStage").replaceChildren();$("playerStage").dataset.mediaUrl="";
- const empty=document.createElement("div");empty.className="empty-player";empty.innerHTML='<div class="play-orb">▶</div><h3>Что будем смотреть?</h3><p>Владелец комнаты может добавить видео с YouTube или из библиотеки.</p>';$("playerStage").append(empty);
- $("mediaTitle").textContent="Видео пока не выбрано";$("timeLabel").textContent="00:00";$("durationLabel").textContent="00:00";$("seekBar").value=0;mediaElement=null;destroyYouTube();updatePlayButton();
-}
-function renderMedia(media,playback){
- if(!media)return clearMedia();$("mediaTitle").textContent=media.title||"Видео";
- if($("playerStage").dataset.mediaUrl===media.url&&(mediaElement||ytPlayer)){if(playback)applyPlayback(playback);return;}
- destroyYouTube();mediaElement=null;$("playerStage").replaceChildren();$("playerStage").dataset.mediaUrl=media.url;
- if(media.type==="file"){
-  const v=document.createElement("video");v.src=media.url;v.controls=false;v.playsInline=true;v.preload="metadata";
-  v.addEventListener("loadedmetadata",()=>{updateProgress(0,v.duration);if(playback)applyPlayback(playback);});
-  v.addEventListener("timeupdate",()=>{if(!suppressPlayerEvents)updateProgress(v.currentTime,v.duration);});
-  v.addEventListener("play",()=>updatePlayButton());v.addEventListener("pause",()=>updatePlayButton());
-  v.addEventListener("ended",()=>{if(isOwner)sendPlayback("pause",v.currentTime);});
-  v.addEventListener("error",()=>toast("Не удалось загрузить видеофайл."));
-  $("playerStage").append(v);mediaElement=v;if(playback)applyPlayback(playback);
-  return;
- }
- const id=youtubeId(media.url);if(!id){toast("Некорректная ссылка YouTube.");return;}
- if(!window.YT?.Player){const wait=document.createElement("p");wait.className="empty-player";wait.textContent="Загружается YouTube…";$("playerStage").append(wait);return;}
- const mount=document.createElement("div");mount.id="youtubePlayer";$("playerStage").append(mount);
- ytPlayer=new YT.Player("youtubePlayer",{videoId:id,width:"100%",height:"100%",playerVars:{playsinline:1,rel:0,enablejsapi:1},events:{
-  onReady:()=>{if(playback)applyPlayback(playback);},
-  onStateChange:e=>{if(!isOwner||suppressPlayerEvents||!ytPlayer)return;if(e.data===YT.PlayerState.PLAYING)sendPlayback("play",ytPlayer.getCurrentTime());if(e.data===YT.PlayerState.PAUSED)sendPlayback("pause",ytPlayer.getCurrentTime());updatePlayButton();},
-  onError:()=>toast("YouTube не разрешил воспроизвести это видео.")
- }});
-}
-function youtubeId(value){try{const u=new URL(value),h=u.hostname.toLowerCase();if(h==="youtu.be")return u.pathname.slice(1).split("/")[0];if(!["youtube.com","www.youtube.com","m.youtube.com"].includes(h))return null;return u.pathname==="/watch"?u.searchParams.get("v"):u.pathname.split("/")[2]||null;}catch{return null;}}
-function fmt(s){if(!Number.isFinite(s))return"00:00";s=Math.max(0,Math.floor(s));const h=Math.floor(s/3600),m=Math.floor(s/60)%60,x=s%60;return h?`${h}:${String(m).padStart(2,"0")}:${String(x).padStart(2,"0")}`:`${String(m).padStart(2,"0")}:${String(x).padStart(2,"0")}`;}
-function updateProgress(t,d){$("timeLabel").textContent=fmt(t);if(Number.isFinite(d)&&d>0){$("durationLabel").textContent=fmt(d);$("seekBar").max=Math.floor(d);if(document.activeElement!==$("seekBar"))$("seekBar").value=Math.min(t,d);}}
-function playerTime(){return mediaElement?.currentTime??ytPlayer?.getCurrentTime?.()??currentRoom?.playback?.currentTime??0;}
-function updatePlayButton(){const playing=mediaElement?!mediaElement.paused:ytPlayer?.getPlayerState?.()===1;$("playBtn").textContent=playing?"Ⅱ":"▶";$("playBtn").title=playing?"Пауза":"Воспроизвести";}
-function applyPlayback(state){
- if(!state||!currentRoom)return;const target=Math.max(0,state.currentTime+(state.playing?Math.max(0,Date.now()-state.updatedAt)/1000:0));suppressPlayerEvents=true;
- if(mediaElement){const apply=()=>{if(!mediaElement)return;try{if(Math.abs(mediaElement.currentTime-target)>1.3)mediaElement.currentTime=target;if(state.playing)mediaElement.play().catch(()=>toast("Нажми воспроизведение, чтобы разрешить запуск."));else mediaElement.pause();updateProgress(target,mediaElement.duration);}catch(e){console.warn(e);}};if(mediaElement.readyState>=1)apply();else mediaElement.addEventListener("loadedmetadata",apply,{once:true});}
- else if(ytPlayer?.seekTo){try{if(Math.abs(ytPlayer.getCurrentTime()-target)>1.3)ytPlayer.seekTo(target,true);state.playing?ytPlayer.playVideo():ytPlayer.pauseVideo();}catch(e){console.warn(e);}}
- clearTimeout(applyPlayback.timer);applyPlayback.timer=setTimeout(()=>{suppressPlayerEvents=false;updatePlayButton();},800);
-}
-function sendPlayback(action,time=playerTime()){if(isOwner&&currentRoom?.media)socket.emit("playback:control",{action,currentTime:time});}
-function renderMessage(m){
- const box=$("chatMessages");if(box.querySelector(".chat-empty"))box.replaceChildren();const el=document.createElement("div");el.className=m.system?"system-message":"message";
- if(m.system)el.textContent=m.text;else{const t=new Date(m.time);const stamp=Number.isNaN(t.getTime())?"":t.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});el.innerHTML=`<div class="message-meta"><b>${esc(m.name)}</b>${m.isOwner?'<span class="person-role">Владелец</span>':""}<time>${esc(stamp)}</time></div><p>${esc(m.text)}</p>`;}
- box.append(el);box.scrollTop=box.scrollHeight;
-}
-async function createRoom(){setError("");const r=await emitReply("room:create",{name:nickname(),sessionId,roomName:"Комната просмотра"});if(!r?.ok)return setError(r?.error);sessionId=r.sessionId||sessionId;localStorage.setItem(SESSION_KEY,sessionId);enterRoom(r.room);renderMessage({system:true,text:"Комната создана. Отправь друзьям код приглашения."});}
-async function joinRoom(code=$("roomCode").value.trim().toUpperCase()){setError("");if(code.length!==6)return setError("Введи код из 6 символов.");const r=await emitReply("room:join",{code,name:nickname(),sessionId});if(!r?.ok)return setError(r?.error);sessionId=r.sessionId||sessionId;localStorage.setItem(SESSION_KEY,sessionId);enterRoom(r.room);}
-function explicitLeave(){stopVoice();socket.emit("room:leave");currentRoom=null;isOwner=false;localStorage.removeItem(ROOM_KEY);clearMedia();showHome();}
-function switchTab(tab){document.querySelectorAll(".source-tab").forEach(b=>b.classList.toggle("active",b.dataset.tab===tab));$("youtubePanel").classList.toggle("hidden",tab!=="youtube");$("filePanel").classList.toggle("hidden",tab!=="file");}
-async function loadLibrary(){
- try{const r=await fetch("/api/library");const data=await r.json();const list=$("libraryList");list.replaceChildren();
-  if(!data.items?.length){list.innerHTML='<p class="hint">Пока нет сохранённых видео.</p>';return;}
-  data.items.forEach(item=>{const row=document.createElement("div");row.className="library-item";const info=document.createElement("div");info.className="library-info";const name=document.createElement("b");name.textContent=item.name;const meta=document.createElement("small");meta.textContent=`${(item.size/1024/1024).toFixed(1)} МБ`;info.append(name,meta);const use=document.createElement("button");use.textContent="Выбрать";use.addEventListener("click",()=>{if(!isOwner)return;socket.emit("media:set",{media:{type:"file",url:item.url,title:item.name}});});const del=document.createElement("button");del.textContent="Удалить";del.className="library-delete";del.addEventListener("click",async()=>{if(!confirm("Удалить видео из библиотеки?"))return;const response=await fetch(`/api/library/${encodeURIComponent(item.id)}`,{method:"DELETE"});if(response.ok)loadLibrary();else toast("Не удалось удалить видео.");});row.append(info,use,del);list.append(row);});
- }catch{toast("Не удалось загрузить библиотеку.");}
-}
-function uploadVideo(file){
- return new Promise((resolve,reject)=>{const xhr=new XMLHttpRequest();xhr.open("POST","/api/upload");xhr.upload.onprogress=e=>{if(e.lengthComputable){const p=Math.round(e.loaded/e.total*100);$("uploadProgress").value=p;$("uploadProgressLabel").textContent=`Загрузка: ${p}%`;}};xhr.onload=()=>{let data={};try{data=JSON.parse(xhr.responseText);}catch{};xhr.status>=200&&xhr.status<300?resolve(data):reject(new Error(data.error||"Ошибка загрузки"));};xhr.onerror=()=>reject(new Error("Ошибка сети при загрузке."));const fd=new FormData();fd.append("video",file);xhr.send(fd);});
-}
-async function startVoice(){
- if(!currentRoom)return;if(!navigator.mediaDevices?.getUserMedia||!window.RTCPeerConnection)return toast("Голосовая связь требует HTTPS и поддержки WebRTC.");
- try{localStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true},video:false});$("micBtn").classList.add("active");$("micBtn").textContent="🎙 Выключить микрофон";$("voiceStatus").textContent="Микрофон включён";socket.emit("voice:ready");currentRoom.participants.filter(p=>p.id!==sessionId).forEach(p=>makePeer(p.id,sessionId.localeCompare(p.id)<0));}
- catch(e){localStream=null;toast(e.name==="NotAllowedError"?"Разреши доступ к микрофону в настройках браузера.":"Не удалось включить микрофон.");}
-}
-function makePeer(id,initiator){
- if(!localStream||peers.has(id))return;const pc=new RTCPeerConnection({iceServers});peers.set(id,pc);localStream.getTracks().forEach(t=>pc.addTrack(t,localStream));
- pc.onicecandidate=e=>{if(e.candidate)socket.emit("voice:signal",{to:id,data:{candidate:e.candidate}});};
- pc.ontrack=e=>{let a=remoteAudio.get(id);if(!a){a=document.createElement("audio");a.autoplay=true;a.playsInline=true;document.body.append(a);remoteAudio.set(id,a);}a.srcObject=e.streams[0];a.play().catch(()=>{});};
- pc.onconnectionstatechange=()=>{if(["failed","closed"].includes(pc.connectionState))removePeer(id);};
- if(initiator)pc.createOffer().then(o=>pc.setLocalDescription(o)).then(()=>socket.emit("voice:signal",{to:id,data:{description:pc.localDescription}})).catch(console.warn);
-}
-function removePeer(id){const p=peers.get(id);if(p){p.onconnectionstatechange=null;p.close();peers.delete(id);}const a=remoteAudio.get(id);if(a){a.srcObject=null;a.remove();remoteAudio.delete(id);}}
-socket.on("voice:peer-joined",({id})=>{if(localStream&&id)makePeer(id,sessionId.localeCompare(id)<0);});
-socket.on("voice:peer-left",({id})=>removePeer(id));
-socket.on("voice:signal",async({from,data})=>{if(!localStream||!from||!data)return;if(!peers.has(from))makePeer(from,false);const pc=peers.get(from);if(!pc)return;try{if(data.description){await pc.setRemoteDescription(data.description);if(data.description.type==="offer"){const answer=await pc.createAnswer();await pc.setLocalDescription(answer);socket.emit("voice:signal",{to:from,data:{description:pc.localDescription}});}}else if(data.candidate)await pc.addIceCandidate(data.candidate);}catch(e){console.warn(e);}});
-function stopVoice(){localStream?.getTracks().forEach(t=>t.stop());localStream=null;[...peers.keys()].forEach(removePeer);$("micBtn").classList.remove("active");$("micBtn").textContent="🎙 Включить микрофон";$("voiceStatus").textContent="Микрофон выключен";}
-async function toggleFullscreen(){
- const stage=$("playerStage"),target=stage.querySelector("video")||stage.querySelector("iframe")?.parentElement||stage;
- try{if(document.fullscreenElement)await document.exitFullscreen();else if(target.requestFullscreen)await target.requestFullscreen();else if(stage.webkitEnterFullscreen)stage.webkitEnterFullscreen();else toast("Полноэкранный режим не поддерживается этим браузером.");}
- catch{toast("Браузер не разрешил полноэкранный режим.");}
-}
-$("createBtn").addEventListener("click",createRoom);$("joinBtn").addEventListener("click",()=>joinRoom());$("roomCode").addEventListener("input",e=>e.target.value=e.target.value.toUpperCase().replace(/[^A-Z0-9]/g,"").slice(0,6));$("roomCode").addEventListener("keydown",e=>{if(e.key==="Enter")joinRoom();});
-$("leaveBtn").addEventListener("click",explicitLeave);$("copyCodeBtn").addEventListener("click",async()=>{if(!currentRoom)return;try{await navigator.clipboard.writeText(currentRoom.code);toast("Код скопирован.");}catch{toast(`Код группы: ${currentRoom.code}`);}});
-document.querySelectorAll(".source-tab").forEach(b=>b.addEventListener("click",()=>{switchTab(b.dataset.tab);if(b.dataset.tab==="file")loadLibrary();}));
-$("addYoutubeBtn").addEventListener("click",()=>{const url=$("youtubeUrl").value.trim();if(!isOwner||!youtubeId(url))return toast("Вставь корректную ссылку YouTube.");socket.emit("media:set",{media:{type:"youtube",url,title:"YouTube-видео"}});$("youtubeUrl").value="";});
-$("videoFile").addEventListener("change",async e=>{const f=e.target.files[0];if(!f)return;if(!f.type.startsWith("video/")){toast("Выбери видеофайл.");return;}if(f.size>2*1024*1024*1024){toast("Максимальный размер — 2 ГБ.");return;}$("uploadProgress").classList.remove("hidden");$("uploadProgressLabel").textContent="Подготовка…";try{const item=await uploadVideo(f);socket.emit("media:set",{media:{type:"file",url:item.url,title:item.name}});$("uploadStatus").textContent=`Сохранено в библиотеку: ${item.name}`;loadLibrary();}catch(err){$("uploadStatus").textContent=err.message;}finally{$("uploadProgress").classList.add("hidden");e.target.value="";}});
-$("playBtn").addEventListener("click",()=>{if(!isOwner||!currentRoom?.media)return;const playing=mediaElement?!mediaElement.paused:ytPlayer?.getPlayerState?.()===1;sendPlayback(playing?"pause":"play",playerTime());});
-$("backBtn").addEventListener("click",()=>sendPlayback("seek",Math.max(0,playerTime()-10)));$("forwardBtn").addEventListener("click",()=>sendPlayback("seek",playerTime()+10));$("seekBar").addEventListener("input",e=>updateProgress(Number(e.target.value),Number($("seekBar").max)));$("seekBar").addEventListener("change",e=>sendPlayback("seek",Number(e.target.value)));
-$("chatForm").addEventListener("submit",e=>{e.preventDefault();const t=$("chatInput").value.trim();if(t&&currentRoom){socket.emit("chat:send",{text:t});$("chatInput").value="";}});
-$("micBtn").addEventListener("click",()=>localStream?stopVoice():startVoice());$("fullscreenBtn").addEventListener("click",toggleFullscreen);$("fullscreenMicBtn").addEventListener("click",()=>localStream?stopVoice():startVoice());
-document.addEventListener("fullscreenchange",()=>{$("fullscreenOverlay").classList.toggle("hidden",!document.fullscreenElement);});
-$("fullscreenExitBtn").addEventListener("click",()=>document.exitFullscreen?.());
-socket.on("room:update",room=>{if(!currentRoom||room.code!==currentRoom.code)return;const prev=currentRoom.media?.url;currentRoom=room;isOwner=room.ownerId===sessionId;setOwnerControls();renderParticipants(room.participants||[]);if(room.media&&(room.media.url!==prev))renderMedia(room.media,room.playback);else if(!room.media)clearMedia();});
-socket.on("playback:update",s=>{if(currentRoom){currentRoom.playback=s;applyPlayback(s);setOwnerControls();}});
-socket.on("chat:message",renderMessage);socket.on("chat:system",t=>renderMessage({system:true,text:t}));socket.on("app:error",toast);
-socket.on("disconnect",()=>{if(currentRoom){toast("Соединение потеряно. Переподключаемся…");stopVoice();}});
-socket.on("connect",async()=>{
- try{const r=await fetch("/api/voice-config",{cache:"no-store"});const c=await r.json();if(c.iceServers?.length)iceServers=c.iceServers;}catch{}
- if(currentRoom){const r=await emitReply("room:join",{code:currentRoom.code,name:nickname(),sessionId});if(r?.ok)enterRoom(r.room);else{toast("Не удалось восстановить комнату. Проверь, не перезапускался ли сервер.");currentRoom=null;isOwner=false;localStorage.removeItem(ROOM_KEY);clearMedia();showHome();}}
- else{let saved;try{saved=JSON.parse(localStorage.getItem(ROOM_KEY)||"null");}catch{}if(saved?.code){const r=await emitReply("room:join",{code:saved.code,name:nickname(),sessionId:saved.sessionId||sessionId});if(r?.ok)enterRoom(r.room);}}
-});
-setInterval(()=>{if(currentRoom?.media){if(mediaElement)updateProgress(mediaElement.currentTime,mediaElement.duration);else if(ytPlayer?.getCurrentTime)updateProgress(ytPlayer.getCurrentTime(),ytPlayer.getDuration());}},1000);
+async function upload(file){const saved=JSON.parse(localStorage.getItem(UPLOAD_KEY)||'null');let init;if(saved&&saved.name===file.name&&saved.size===file.size){init={uploadId:saved.uploadId}}else{const r=await fetch('/api/upload/init',{method:'POST',headers:{'Content-Type':'application/json','x-wt-session':sessionId},body:JSON.stringify({name:file.name,size:file.size,type:file.type})});init=await r.json();if(!r.ok)throw Error(init.error||'Не удалось начать загрузку');localStorage.setItem(UPLOAD_KEY,JSON.stringify({uploadId:init.uploadId,name:file.name,size:file.size}))}const id=init.uploadId,status=await fetch(`/api/upload/${id}/status`,{headers:{'x-wt-session':sessionId}}),st=await status.json();if(!status.ok)throw Error(st.error||'Не удалось продолжить загрузку');const received=new Set(st.received||[]),count=Math.ceil(file.size/st.chunkSize);let done=received.size;$('uploadProgress').classList.remove('hidden');$('uploadProgress').value=done/count*100;$('uploadProgressLabel').textContent=`Загрузка: ${Math.round(done/count*100)}%`;for(let i=0;i<count;i++){if(received.has(i))continue;const blob=file.slice(i*st.chunkSize,Math.min(file.size,(i+1)*st.chunkSize));const r=await fetch(`/api/upload/${id}/chunk/${i}`,{method:'PUT',headers:{'x-wt-session':sessionId,'Content-Type':'application/octet-stream'},body:blob});if(!r.ok)throw Error('Ошибка загрузки части '+(i+1));done++;$('uploadProgress').value=done/count*100;$('uploadProgressLabel').textContent=`Загрузка: ${Math.round(done/count*100)}%`;}const r=await fetch(`/api/upload/${id}/complete`,{method:'POST',headers:{'x-wt-session':sessionId}}),item=await r.json();if(!r.ok)throw Error(item.error||'Не удалось завершить загрузку');localStorage.removeItem(UPLOAD_KEY);return item}
+async function startVoice(){if(!currentRoom)return;if(!navigator.mediaDevices?.getUserMedia)return toast('Для микрофона нужен HTTPS.');try{localStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true},video:false});$('micBtn').classList.add('active');$('micBtn').textContent='Выключить микрофон';$('voiceStatus').textContent='Микрофон включён';socket.emit('voice:ready');setupVAD();currentRoom.participants.filter(p=>p.id!==sessionId).forEach(p=>makePeer(p.id,sessionId.localeCompare(p.id)<0))}catch(e){toast(e.name==='NotAllowedError'?'Разреши доступ к микрофону.':'Не удалось включить микрофон.')}}
+function setupVAD(){try{audioContext=new AudioContext();const source=audioContext.createMediaStreamSource(localStream);analyser=audioContext.createAnalyser();analyser.fftSize=512;source.connect(analyser);const data=new Uint8Array(analyser.frequencyBinCount);vadTimer=setInterval(()=>{analyser.getByteTimeDomainData(data);let sum=0;for(const v of data){const x=(v-128)/128;sum+=x*x}const rms=Math.sqrt(sum/data.length),speaking=rms>.045;if(speaking!==lastSpeaking){lastSpeaking=speaking;socket.emit('voice:speaking',{speaking})}},150)}catch{}}
+function stopVoice(){if(vadTimer)clearInterval(vadTimer);vadTimer=null;lastSpeaking=false;socket.emit('voice:speaking',{speaking:false});audioContext?.close().catch(()=>{});audioContext=null;localStream?.getTracks().forEach(t=>t.stop());localStream=null;[...peers.keys()].forEach(removePeer);$('micBtn').classList.remove('active');$('micBtn').textContent='🎙 Включить микрофон';$('voiceStatus').textContent='Микрофон выключен'}
+function makePeer(id,initiator){if(!localStream||peers.has(id))return;const pc=new RTCPeerConnection({iceServers});peers.set(id,pc);localStream.getTracks().forEach(t=>pc.addTrack(t,localStream));pc.onicecandidate=e=>e.candidate&&socket.emit('voice:signal',{to:id,data:{candidate:e.candidate}});pc.ontrack=e=>{let a=remoteAudio.get(id);if(!a){a=document.createElement('audio');a.autoplay=true;a.playsInline=true;document.body.append(a);remoteAudio.set(id,a)}a.srcObject=e.streams[0];a.play().catch(()=>{})};pc.onconnectionstatechange=()=>{if(['failed','closed'].includes(pc.connectionState))removePeer(id)};if(initiator)pc.createOffer().then(o=>pc.setLocalDescription(o)).then(()=>socket.emit('voice:signal',{to:id,data:{description:pc.localDescription}})).catch(()=>{})}
+function removePeer(id){const p=peers.get(id);if(p){p.onconnectionstatechange=null;p.close();peers.delete(id)}const a=remoteAudio.get(id);if(a){a.srcObject=null;a.remove();remoteAudio.delete(id)}}
+socket.on('voice:peer-joined',({id})=>{if(localStream&&id)makePeer(id,sessionId.localeCompare(id)<0)});socket.on('voice:peer-left',({id})=>removePeer(id));socket.on('voice:signal',async({from,data})=>{if(!localStream||!from||!data)return;if(!peers.has(from))makePeer(from,false);const pc=peers.get(from);try{if(data.description){await pc.setRemoteDescription(data.description);if(data.description.type==='offer'){const a=await pc.createAnswer();await pc.setLocalDescription(a);socket.emit('voice:signal',{to:from,data:{description:pc.localDescription}})}}else if(data.candidate)await pc.addIceCandidate(data.candidate)}catch{}});
+function fullscreen(){const stage=$('playerStage');if(document.fullscreenElement)document.exitFullscreen?.();else stage.requestFullscreen?.().catch(()=>toast('Не удалось открыть полный экран.'))}
+$('createBtn').onclick=createRoom;$('joinBtn').onclick=()=>joinRoom();$('roomCode').oninput=e=>e.target.value=e.target.value.toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,6);$('roomCode').onkeydown=e=>{if(e.key==='Enter')joinRoom()};$('leaveBtn').onclick=exitRoom;$('copyCodeBtn').onclick=()=>navigator.clipboard?.writeText(currentRoom?.code||'').then(()=>toast('Код скопирован.')).catch(()=>toast(currentRoom?.code||''));
+document.querySelectorAll('.source-tab').forEach(b=>b.onclick=()=>tab(b.dataset.tab));
+$('archiveSearchBtn').onclick=()=>searchArchive(1);
+$('archiveSearchInput').onkeydown=e=>{if(e.key==='Enter')searchArchive(1)};
+$('archivePrevBtn').onclick=()=>searchArchive(Math.max(1,archivePage-1));
+$('archiveNextBtn').onclick=()=>searchArchive(archivePage+1);$('addYoutubeBtn').onclick=()=>{const u=$('youtubeUrl').value.trim();if(!isOwner||!youtubeId(u))return toast('Вставь корректную ссылку YouTube.');socket.emit('media:set',{media:{type:'youtube',url:u,title:'YouTube-видео'}});$('youtubeUrl').value=''};
+$('addExternalBtn').onclick=()=>{const u=$('externalUrl').value.trim();if(!isOwner)return;let parsed;try{parsed=new URL(u)}catch{return toast('Введи корректную ссылку.')}if(!['http:','https:'].includes(parsed.protocol))return toast('Поддерживаются только HTTP/HTTPS ссылки.');const direct=/\.(mp4|webm|ogg|m4v)(\?.*)?$/i.test(parsed.pathname+parsed.search);socket.emit('media:set',{media:{type:direct?'direct':'external',url:u,title:$('externalTitle').value.trim()||parsed.hostname}});$('externalUrl').value=''};
+$('videoFile').onchange=async e=>{const f=e.target.files[0];if(!f)return;if(!f.type.startsWith('video/'))return toast('Выбери видеофайл.');if(f.size>2*1024*1024*1024)return toast('Максимум 2 ГБ.');try{const item=await upload(f);socket.emit('media:set',{media:{type:'file',url:item.url,title:item.name,variants:item.variants}});$('uploadStatus').textContent='Видео сохранено в библиотеке. Качества готовятся в фоне.';loadLibrary()}catch(x){$('uploadStatus').textContent=x.message}finally{$('uploadProgress').classList.add('hidden');e.target.value=''}};
+$('qualitySelect').onchange=()=>{if(!isOwner||!mediaElement)return;socket.emit('media:quality',{url:$('qualitySelect').value,currentTime:mediaElement.currentTime})};
+$('playBtn').onclick=()=>send(currentRoom?.playback?.playing?'pause':'play',time());$('backBtn').onclick=()=>send('seek',Math.max(0,time()-10));$('forwardBtn').onclick=()=>send('seek',time()+10);$('seekBar').oninput=e=>updateProgress(Number(e.target.value),Number($('seekBar').max));$('seekBar').onchange=e=>send('seek',Number(e.target.value));const stopForAll=()=>{if(isOwner&&confirm('Остановить видео для всех участников?'))socket.emit('media:stop')};$('stopMediaBtn').onclick=stopForAll;$('stopMediaTopBtn').onclick=stopForAll;$('stopRequestBtn').onclick=()=>socket.emit('media:stop-request');$('chatForm').onsubmit=e=>{e.preventDefault();const t=$('chatInput').value.trim();if(t&&currentRoom){socket.emit('chat:send',{text:t});$('chatInput').value=''}};$('micBtn').onclick=()=>localStream?stopVoice():startVoice();$('fullscreenBtn').onclick=fullscreen;$('fullscreenMicBtn').onclick=()=>localStream?stopVoice():startVoice();$('fullscreenExitBtn').onclick=()=>document.exitFullscreen?.();
+document.addEventListener('fullscreenchange',()=>{$('fullscreenToolbar').classList.toggle('hidden',!document.fullscreenElement);});
+socket.on('room:update',r=>{if(!currentRoom||r.code!==currentRoom.code)return;const prev=currentRoom.media?.url,prevPlay=currentRoom.media?.playUrl||prev,prevVariants=JSON.stringify(currentRoom.media?.variants||[]);currentRoom=r;isOwner=r.ownerId===sessionId;controls();people(r.participants||[]);if(r.media&&(r.media.url!==prev||(r.media.playUrl||r.media.url)!==prevPlay||JSON.stringify(r.media.variants||[])!==prevVariants))renderMedia(r.media,r.playback);else if(!r.media)clearMedia()});socket.on('playback:update',s=>{if(currentRoom){currentRoom.playback=s;applyPlayback(s);controls()}});socket.on('media:stopped',()=>{clearMedia();toast('Владелец остановил видео.')});socket.on('media:stop-requested',p=>{if(!isOwner)return;$('requestText').textContent=`${p.requesterName} просит остановить видео.`;$('stopRequestDialog').dataset.requestId=p.requestId;$('stopRequestDialog').dataset.requesterId=p.requesterId;$('stopRequestDialog').classList.remove('hidden')});$('acceptStopBtn').onclick=()=>{const d=$('stopRequestDialog');socket.emit('media:stop-response',{requestId:d.dataset.requestId,requesterId:d.dataset.requesterId,accept:true});d.classList.add('hidden')};$('rejectStopBtn').onclick=()=>{const d=$('stopRequestDialog');socket.emit('media:stop-response',{requestId:d.dataset.requestId,requesterId:d.dataset.requesterId,accept:false});d.classList.add('hidden')};socket.on('media:stop-request-sent',()=>toast('Запрос отправлен владельцу.'));socket.on('media:stop-result',p=>toast(p.accepted?'Владелец остановил видео.':'Владелец отклонил запрос.'));socket.on('chat:message',message);socket.on('chat:system',t=>message({system:true,text:t}));socket.on('app:error',toast);
+socket.on('disconnect',()=>{if(currentRoom){toast('Соединение потеряно. Переподключаемся…');stopVoice()}});socket.on('connect',async()=>{try{const c=await fetch('/api/voice-config').then(r=>r.json());if(c.iceServers)iceServers=c.iceServers}catch{}let saved=currentRoom?{code:currentRoom.code,sessionId}:JSON.parse(localStorage.getItem(ROOM_KEY)||'null');if(saved?.code){const r=await reply('room:join',{code:saved.code,name:name(),sessionId:saved.sessionId||sessionId});if(r?.ok)enterRoom(r.room);else if(currentRoom){toast(r.error||'Не удалось восстановить комнату.');currentRoom=null;localStorage.removeItem(ROOM_KEY);home()}}});
+setInterval(()=>{if(currentRoom?.media&&mediaElement)updateProgress(mediaElement.currentTime,mediaElement.duration)},1000);
